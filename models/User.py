@@ -1,18 +1,36 @@
-from typing import List
+from typing import Optional, List
+from pydantic import BaseModel, EmailStr
+from datetime import datetime
 
-from pydantic import BaseModel
+class UserBase(BaseModel):
+    email: EmailStr
+    username: str
+    first_name: str
+    last_name: str
 
+class UserCreate(UserBase):
+    password: str
 
-class UserCreate(BaseModel):
-    nom: str
-    prenom: str
-    embedding: List[float]
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
 
-class UserRead(BaseModel):
+class UserResponse(UserBase):
     id: int
-    nom: str
-    prenom: str
-    embedding: List[float]
+    is_active: bool
+    created_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    movie_preferences: Optional[List[str]] = None
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    expires_in: int
+    user: UserResponse
