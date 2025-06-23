@@ -6,4 +6,5 @@
 *.db
 
 __pycache__
+db/*.json
 
