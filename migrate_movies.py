@@ -139,7 +139,7 @@ async def process_movie_batch(batch: List[Dict[str, Any]], vector_service) -> tu
     return inserted_count, updated_count
 
 def prepare_movie_data(movie_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Préparer les données du film pour MongoDB"""
+    """Préparer les données du film pour MongoDB avec les métadonnées enrichies"""
     return {
         "tmdb_id": movie_data.get("id"),
         "title": movie_data.get("title", ""),
@@ -160,7 +160,14 @@ def prepare_movie_data(movie_data: Dict[str, Any]) -> Dict[str, Any]:
         "revenue": movie_data.get("revenue"),
         "production_companies": movie_data.get("production_companies", []),
         "production_countries": movie_data.get("production_countries", []),
-        "spoken_languages": movie_data.get("spoken_languages", [])
+        "spoken_languages": movie_data.get("spoken_languages", []),
+
+        # Champs enrichis
+        "tagline": movie_data.get("tagline"),
+        "directors": movie_data.get("directors", []),
+        "cast": movie_data.get("cast", []),
+        "keywords": movie_data.get("keywords", []),
+        "tmdb_url": movie_data.get("tmdb_url")
     }
 
 def extract_genres(genres_data) -> List[str]:
