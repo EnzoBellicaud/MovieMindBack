@@ -1,18 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from typing import List
+from typing import List, Optional
+from bson import ObjectId
 
-from db.init_db import get_db, User
-from models.User import UserResponse, UserUpdate
-from models.Follow import (
-    FollowStatsResponse, 
-    IsFollowingResponse, 
-    MutualFollowsResponse,
-    SuggestedUsersResponse
-)
-from routes.auth import get_current_active_user
-from services.follow_service import FollowService
+from models.User import User, UserResponse, UserUpdate, FollowRequest
+from models.Follow import Follow
+from services.auth import get_current_user
 
 router = APIRouter(
     prefix="/users",
@@ -21,12 +13,12 @@ router = APIRouter(
 )
 
 @router.get("/me", response_model=UserResponse)
-async def get_my_profile(current_user: User = Depends(get_current_active_user)):
+async def get_my_profile(current_user: User = Depends(get_current_user)):
     """
     Récupérer le profil de l'utilisateur connecté
     """
     return UserResponse(
-        id=current_user.id,
+        id=str(current_user.id),
         email=current_user.email,
         username=current_user.username,
         first_name=current_user.first_name,
@@ -38,33 +30,51 @@ async def get_my_profile(current_user: User = Depends(get_current_active_user)):
 @router.put("/me", response_model=UserResponse)
 async def update_my_profile(
     user_update: UserUpdate,
-    current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Mettre à jour le profil de l'utilisateur connecté
     """
-    # Vérifier si le nouveau nom d'utilisateur est déjà pris
-    if user_update.username and user_update.username != current_user.username:
-        existing_user = await db.execute(
-            select(User).where(User.username == user_update.username)
+    update_data = {}
+    
+    if user_update.username:
+        # Vérifier que le nom d'utilisateur n'est pas déjà pris
+        existing_user = await User.find_one(
+            User.username == user_update.username,
+            User.id != current_user.id
         )
-        if existing_user.scalar_one_or_none():
+        if existing_user:
             raise HTTPException(
                 status_code=400,
                 detail="Ce nom d'utilisateur est déjà pris"
             )
+        update_data["username"] = user_update.username
     
-    # Mettre à jour les champs
-    update_data = user_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(current_user, field, value)
+    if user_update.first_name is not None:
+        update_data["first_name"] = user_update.first_name
     
-    await db.commit()
-    await db.refresh(current_user)
+    if user_update.last_name is not None:
+        update_data["last_name"] = user_update.last_name
+    
+    if user_update.email:
+        # Vérifier que l'email n'est pas déjà pris
+        existing_user = await User.find_one(
+            User.email == user_update.email,
+            User.id != current_user.id
+        )
+        if existing_user:
+            raise HTTPException(
+                status_code=400,
+                detail="Cet email est déjà utilisé"
+            )
+        update_data["email"] = user_update.email
+    
+    if update_data:
+        await current_user.update({"$set": update_data})
+        await current_user.save()
     
     return UserResponse(
-        id=current_user.id,
+        id=str(current_user.id),
         email=current_user.email,
         username=current_user.username,
         first_name=current_user.first_name,
@@ -73,122 +83,183 @@ async def update_my_profile(
         created_at=current_user.created_at
     )
 
-@router.get("/suggested")
+@router.get("/suggestions", response_model=List[UserResponse])
 async def get_suggested_users(
     limit: int = 10,
-    current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Obtenir des suggestions d'utilisateurs à suivre
     """
-    suggestions = await FollowService.get_suggested_users(db, current_user.id, limit)
-    return {
-        "suggestions": [UserResponse(**user) for user in suggestions],
-        "total": len(suggestions)
-    }
+    # Récupérer les IDs des utilisateurs que l'utilisateur actuel suit déjà
+    following_docs = await Follow.find(Follow.follower_id == current_user.id).to_list()
+    following_ids = [doc.followed_id for doc in following_docs]
+    following_ids.append(current_user.id)  # Exclure l'utilisateur actuel
+    
+    # Trouver des utilisateurs que l'utilisateur actuel ne suit pas
+    suggestions = await User.find(
+        {"_id": {"$nin": following_ids}},
+        limit=limit
+    ).to_list()
+    
+    return [
+        UserResponse(
+            id=str(user.id),
+            email=user.email,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_active=user.is_active,
+            created_at=user.created_at
+        )
+        for user in suggestions
+    ]
 
-@router.get("/mutual-follows/{user_id}", response_model=MutualFollowsResponse)
-async def get_mutual_follows(
-    user_id: int,
-    current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Vérifier les relations de suivi mutuelles avec un autre utilisateur
-    """
-    return await FollowService.get_mutual_follows(db, current_user.id, user_id)
-
-
-@router.post("/{user_id}/follow")
+@router.post("/follow/{user_id}")
 async def follow_user(
-    user_id: int,
-    current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    user_id: str,
+    current_user: User = Depends(get_current_user)
 ):
     """
     Suivre un utilisateur
     """
-    return await FollowService.follow_user(db, current_user.id, user_id)
+    # Vérifier que l'utilisateur à suivre existe
+    try:
+        target_user = await User.get(ObjectId(user_id))
+    except:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    # Vérifier que l'utilisateur ne se suit pas lui-même
+    if str(target_user.id) == str(current_user.id):
+        raise HTTPException(status_code=400, detail="Vous ne pouvez pas vous suivre vous-même")
+    
+    # Vérifier si l'utilisateur ne suit pas déjà cet utilisateur
+    existing_follow = await Follow.find_one(
+        Follow.follower_id == current_user.id,
+        Follow.followed_id == target_user.id
+    )
+    if existing_follow:
+        raise HTTPException(status_code=400, detail="Vous suivez déjà cet utilisateur")
+    
+    # Créer la relation de suivi
+    follow = Follow(
+        follower_id=current_user.id,
+        followed_id=target_user.id
+    )
+    await follow.insert()
+    
+    return {"message": "Utilisateur suivi avec succès"}
 
-@router.delete("/{user_id}/follow")
+@router.delete("/unfollow/{user_id}")
 async def unfollow_user(
-    user_id: int,
-    current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    user_id: str,
+    current_user: User = Depends(get_current_user)
 ):
     """
     Ne plus suivre un utilisateur
     """
-    return await FollowService.unfollow_user(db, current_user.id, user_id)
-
-@router.get("/{user_id}/followers", response_model=List[UserResponse])
-async def get_user_followers(
-    user_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Récupérer la liste des followers d'un utilisateur
-    """
-    followers = await FollowService.get_followers(db, user_id)
-    return [UserResponse(**follower) for follower in followers]
-
-@router.get("/{user_id}/following", response_model=List[UserResponse])
-async def get_user_following(
-    user_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Récupérer la liste des utilisateurs suivis par un utilisateur
-    """
-    following = await FollowService.get_following(db, user_id)
-    return [UserResponse(**followed) for followed in following]
-
-@router.get("/{user_id}/follow-stats", response_model=FollowStatsResponse)
-async def get_user_follow_stats(
-    user_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Récupérer les statistiques de suivi d'un utilisateur
-    """
-    return await FollowService.get_follow_stats(db, user_id)
-
-@router.get("/{user_id}/is-following", response_model=IsFollowingResponse)
-async def check_if_following(
-    user_id: int,
-    current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Vérifier si l'utilisateur connecté suit un autre utilisateur
-    """
-    is_following = await FollowService.is_following(db, current_user.id, user_id)
-    return IsFollowingResponse(
-        is_following=is_following,
-        follower_id=current_user.id,
-        followed_id=user_id
+    # Vérifier que l'utilisateur à ne plus suivre existe
+    try:
+        target_user = await User.get(ObjectId(user_id))
+    except:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    # Trouver et supprimer la relation de suivi
+    follow = await Follow.find_one(
+        Follow.follower_id == current_user.id,
+        Follow.followed_id == target_user.id
     )
+    if not follow:
+        raise HTTPException(status_code=400, detail="Vous ne suivez pas cet utilisateur")
     
+    await follow.delete()
     
+    return {"message": "Utilisateur retiré de vos abonnements avec succès"}
+
+@router.get("/followers", response_model=List[UserResponse])
+async def get_followers(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Obtenir la liste des followers de l'utilisateur connecté
+    """
+    # Récupérer les IDs des followers
+    follow_docs = await Follow.find(Follow.followed_id == current_user.id).to_list()
+    follower_ids = [doc.follower_id for doc in follow_docs]
+    
+    if not follower_ids:
+        return []
+    
+    # Récupérer les utilisateurs correspondants
+    followers = await User.find({"_id": {"$in": follower_ids}}).to_list()
+    
+    return [
+        UserResponse(
+            id=str(user.id),
+            email=user.email,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_active=user.is_active,
+            created_at=user.created_at
+        )
+        for user in followers
+    ]
+
+@router.get("/following", response_model=List[UserResponse])
+async def get_following(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Obtenir la liste des utilisateurs suivis par l'utilisateur connecté
+    """
+    # Récupérer les IDs des utilisateurs suivis
+    follow_docs = await Follow.find(Follow.follower_id == current_user.id).to_list()
+    following_ids = [doc.followed_id for doc in follow_docs]
+    
+    if not following_ids:
+        return []
+    
+    # Récupérer les utilisateurs correspondants
+    following = await User.find({"_id": {"$in": following_ids}}).to_list()
+    
+    return [
+        UserResponse(
+            id=str(user.id),
+            email=user.email,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_active=user.is_active,
+            created_at=user.created_at
+        )
+        for user in following
+    ]
+
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user_profile(
-    user_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    user_id: str,
+    current_user: User = Depends(get_current_user)
 ):
     """
     Récupérer le profil d'un utilisateur par son ID
     """
-    user = await db.get(User, user_id)
+    try:
+        user = await User.get(ObjectId(user_id))
+    except:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
     
     return UserResponse(
-        id=user.id,
+        id=str(user.id),
         email=user.email,
         username=user.username,
         first_name=user.first_name,
@@ -196,3 +267,37 @@ async def get_user_profile(
         is_active=user.is_active,
         created_at=user.created_at
     )
+
+@router.get("/search/{query}", response_model=List[UserResponse])
+async def search_users(
+    query: str,
+    limit: int = 10,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Rechercher des utilisateurs par nom d'utilisateur, prénom ou nom
+    """
+    # Recherche par regex (insensible à la casse)
+    users = await User.find(
+        {
+            "$or": [
+                {"username": {"$regex": query, "$options": "i"}},
+                {"first_name": {"$regex": query, "$options": "i"}},
+                {"last_name": {"$regex": query, "$options": "i"}}
+            ]
+        },
+        limit=limit
+    ).to_list()
+    
+    return [
+        UserResponse(
+            id=str(user.id),
+            email=user.email,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_active=user.is_active,
+            created_at=user.created_at
+        )
+        for user in users
+    ]

@@ -2,14 +2,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routes.auth import router as auth_router
 from routes.user_routes import router as user_router
+from routes.chat import router as chat_router
+from routes.movies import router as movies_router
 from contextlib import asynccontextmanager
-from db.init_db import init_db
+from db.init_db import init_db, close_mongodb_connection
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize database tables on startup
+    # Initialize MongoDB database on startup
     await init_db()
     yield
+    # Close MongoDB connection on shutdown
+    await close_mongodb_connection()
     
 app = FastAPI(
     title="MovieMind API",
@@ -30,6 +34,8 @@ app.add_middleware(
 # Inclusion des routes
 app.include_router(auth_router)
 app.include_router(user_router)
+app.include_router(chat_router)
+app.include_router(movies_router)
 
 @app.get("/")
 async def root():

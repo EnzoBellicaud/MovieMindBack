@@ -1,59 +1,75 @@
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table
-from sqlalchemy.types import JSON
-from datetime import datetime
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import init_beanie
 import os
+from typing import Optional
 
-# Create db directory if it doesn't exist
-os.makedirs("db", exist_ok=True)
+# Models imports
+from models.User import User
+from models.Movie import Movie
+from models.Follow import Follow
 
-DATABASE_URL = "sqlite+aiosqlite:///db/moviemind.db"
-engine = create_async_engine(DATABASE_URL, echo=False)
-async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-Base = declarative_base()
+# MongoDB configuration
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://root:rootpassword@localhost:27017")
+DATABASE_NAME = "moviemind"
 
-# Table d'association pour les followers
-follow_table = Table(
-    "follows",
-    Base.metadata,
-    Column("follower_id", Integer, ForeignKey("users.id"), primary_key=True),
-    Column("followed_id", Integer, ForeignKey("users.id"), primary_key=True)
-)
+# Global database client
+mongodb_client: Optional[AsyncIOMotorClient] = None
 
-class User(Base):
-    __tablename__ = "users"
+async def get_mongodb_client() -> AsyncIOMotorClient:
+    """Get MongoDB client instance"""
+    global mongodb_client
+    if mongodb_client is None:
+        mongodb_client = AsyncIOMotorClient(MONGODB_URL)
+    return mongodb_client
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    username = Column(String, unique=True, index=True, nullable=False)
-    first_name = Column(String, nullable=False)
-    last_name = Column(String, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Preferences de films (optionnel pour l'extension future)
-    movie_preferences = Column(JSON, nullable=True)
+async def close_mongodb_connection():
+    """Close MongoDB connection"""
+    global mongodb_client
+    if mongodb_client is not None:
+        mongodb_client.close()
+        mongodb_client = None
 
-    # Relations pour le système de suivi
-    followers = relationship(
-        "User",
-        secondary=follow_table,
-        primaryjoin=id == follow_table.c.followed_id,
-        secondaryjoin=id == follow_table.c.follower_id,
-        backref="following"
-    )
-
-# Dependency pour obtenir la session de base de données
-async def get_db():
-    async with async_session() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
-
-# Initialize database tables
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Initialize MongoDB database and collections"""
+    client = await get_mongodb_client()
+      # Initialize beanie with document models
+    await init_beanie(
+        database=client[DATABASE_NAME],
+        document_models=[User, Movie, Follow]
+    )
+    
+    # Create indexes for better performance
+    await create_indexes()
+    
+    print("MongoDB database initialized successfully!")
+
+async def create_indexes():
+    """Create database indexes for optimal performance"""
+    try:
+        # User indexes
+        await User.create_index("email", unique=True)
+        await User.create_index("username", unique=True)
+        
+        # Movie indexes
+        await Movie.create_index("tmdb_id", unique=True)
+        await Movie.create_index("title")
+        await Movie.create_index("genres")
+        await Movie.create_index("release_date")
+          # Vector search index (will be created manually in MongoDB Atlas or with MongoDB 6.0+)
+        # For local development, we'll use text search as fallback
+        await Movie.create_index([("title", "text"), ("overview", "text"), ("genres", "text")])
+        
+        # Follow indexes
+        await Follow.create_index("follower_id")
+        await Follow.create_index("followed_id")
+        await Follow.create_index([("follower_id", 1), ("followed_id", 1)], unique=True)  # Éviter les doublons
+        
+        print("Database indexes created successfully!")
+    except Exception as e:
+        print(f"Error creating indexes: {e}")
+
+# Dependency to get database instance
+async def get_database():
+    """Dependency to get database instance"""
+    client = await get_mongodb_client()
+    return client[DATABASE_NAME]

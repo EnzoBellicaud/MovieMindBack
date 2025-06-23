@@ -1,7 +1,28 @@
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
+from beanie import Document
+from bson import ObjectId
 from .User import UserResponse
+
+class Follow(Document):
+    """Modèle de suivi entre utilisateurs"""
+    follower_id: ObjectId  # ID de l'utilisateur qui suit
+    followed_id: ObjectId  # ID de l'utilisateur suivi
+    created_at: datetime = datetime.utcnow()
+    
+    class Settings:
+        name = "follows"
+        indexes = [
+            ("follower_id", "followed_id"),  # Index composé pour les requêtes
+            "follower_id",
+            "followed_id"
+        ]
+    
+    model_config = {
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str}
+    }
 
 class FollowResponse(BaseModel):
     """Réponse pour une action de suivi"""

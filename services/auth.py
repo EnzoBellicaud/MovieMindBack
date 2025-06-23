@@ -2,15 +2,13 @@ from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from fastapi import HTTPException, status
+from fastapi import HTTPException, status, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import secrets
 import os
 from dotenv import load_dotenv
 
-from db.init_db import User
-from models.User import UserCreate, UserLogin, UserResponse, Token
+from models.User import User, UserCreate, UserLogin, UserResponse, Token
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -23,6 +21,9 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
 # Contexte de cryptage pour les mots de passe
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Security scheme for JWT
+security = HTTPBearer()
+
 # Fonctions utilitaires pour les mots de passe
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Vérifier un mot de passe en clair avec son hash"""
@@ -32,33 +33,30 @@ def get_password_hash(password: str) -> str:
     """Hasher un mot de passe"""
     return pwd_context.hash(password)
 
-# Fonctions de gestion des utilisateurs
-async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
+# Fonctions de gestion des utilisateurs avec MongoDB
+async def get_user_by_email(email: str) -> Optional[User]:
     """Récupérer un utilisateur par email"""
-    result = await db.execute(select(User).where(User.email == email))
-    return result.scalar_one_or_none()
+    return await User.find_one(User.email == email)
 
-async def get_user_by_username(db: AsyncSession, username: str) -> Optional[User]:
+async def get_user_by_username(username: str) -> Optional[User]:
     """Récupérer un utilisateur par nom d'utilisateur"""
-    result = await db.execute(select(User).where(User.username == username))
-    return result.scalar_one_or_none()
+    return await User.find_one(User.username == username)
 
-async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
+async def get_user_by_id(user_id: str) -> Optional[User]:
     """Récupérer un utilisateur par ID"""
-    result = await db.execute(select(User).where(User.id == user_id))
-    return result.scalar_one_or_none()
+    return await User.get(user_id)
 
-async def create_user(db: AsyncSession, user_data: UserCreate) -> User:
+async def create_user(user_data: UserCreate) -> User:
     """Créer un nouvel utilisateur"""
     # Vérifier que l'email et le nom d'utilisateur n'existent pas déjà
-    existing_user = await get_user_by_email(db, user_data.email)
+    existing_user = await get_user_by_email(user_data.email)
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Un utilisateur avec cet email existe déjà"
         )
     
-    existing_username = await get_user_by_username(db, user_data.username)
+    existing_username = await get_user_by_username(user_data.username)
     if existing_username:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -77,14 +75,12 @@ async def create_user(db: AsyncSession, user_data: UserCreate) -> User:
         created_at=datetime.utcnow()
     )
     
-    db.add(db_user)
-    await db.commit()
-    await db.refresh(db_user)
+    await db_user.insert()
     return db_user
 
-async def authenticate_user(db: AsyncSession, email: str, password: str) -> Optional[User]:
+async def authenticate_user(email: str, password: str) -> Optional[User]:
     """Authentifier un utilisateur"""
-    user = await get_user_by_email(db, email)
+    user = await get_user_by_email(email)
     if not user:
         return None
     if not verify_password(password, user.hashed_password):
@@ -115,14 +111,30 @@ def verify_token(token: str) -> Optional[str]:
     except JWTError:
         return None
 
-async def get_current_user(db: AsyncSession, token: str) -> Optional[User]:
+async def get_current_user_from_token(token: str) -> Optional[User]:
     """Récupérer l'utilisateur actuel à partir du token"""
     email = verify_token(token)
     if email is None:
         return None
     
-    user = await get_user_by_email(db, email)
+    user = await get_user_by_email(email)
     return user
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
+    """Dependency pour récupérer l'utilisateur actuel"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        user = await get_current_user_from_token(credentials.credentials)
+        if user is None:
+            raise credentials_exception
+        return user
+    except Exception:
+        raise credentials_exception
 
 def generate_secret_key() -> str:
     """Générer une clé secrète sécurisée pour la production"""
