@@ -1,6 +1,27 @@
 import json
 import random
 from typing import List, Dict, Any, Optional
+from langchain_mistralai.chat_models import ChatMistralAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+from langchain.schema.runnable import Runnable
+from pydantic import BaseModel, Field
+import logging
+
+# Configuration du logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class MovieSearchFilters(BaseModel):
+    genres: List[str] = Field(description="Liste de genres en français, ex: ['comédie', 'drame']")
+    keywords: List[str] = Field(description="Liste de mots-clés significatifs en anglais")
+    cast: List[str] = Field(description="Acteurs du film, ex: ['Tom Hanks', 'Liam Neeson']")
+    directors: List[str] = Field(description="Réalisateurs du film, ex: ['Steven Spielberg']")
+
 
 class TMDBMovieService:
     """Service pour gérer les films TMDB"""
@@ -44,15 +65,22 @@ class TMDBMovieService:
         enhanced_movie['poster_url'] = enhanced_movie['poster_urls'].get('w500', '') if poster_path else ''
         
         return enhanced_movie
+
     def load_movies(self) -> List[Dict[str, Any]]:
         """Charger tous les films depuis le fichier JSON"""
         if self._movies_cache is None:
             try:
                 with open(self.json_file_path, 'r', encoding='utf-8') as f:
                     self._movies_cache = json.load(f)
-                print(f"Loaded {len(self._movies_cache)} movies from TMDB")
+                logger.info(f"Loaded {len(self._movies_cache)} movies from TMDB")
+            except FileNotFoundError as e:
+                logger.error(f"File not found: {self.json_file_path}")
+                self._movies_cache = []
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {e}")
+                self._movies_cache = []
             except Exception as e:
-                print(f"Error loading movies: {e}")
+                logger.exception(f"Unexpected error while loading movies: {e}")
                 self._movies_cache = []
         return self._movies_cache
     
@@ -65,53 +93,7 @@ class TMDBMovieService:
             selected_movies = random.sample(movies, count)
         
         return [self._enhance_movie_data(movie) for movie in selected_movies]
-    
-    def search_movies_by_genre(self, genres: List[str], count: int = 10) -> List[Dict[str, Any]]:
-        """Rechercher des films par genre avec données améliorées"""
-        movies = self.load_movies()
-        filtered_movies = []
-        
-        for movie in movies:
-            movie_genres = movie.get('genres', [])
-            if isinstance(movie_genres, list):
-                # Vérifier si au moins un genre correspond
-                if any(genre.lower() in [g.lower() for g in movie_genres] for genre in genres):
-                    filtered_movies.append(movie)
-        
-        if len(filtered_movies) <= count:
-            selected_movies = filtered_movies
-        else:
-            selected_movies = random.sample(filtered_movies, count)
-        
-        return [self._enhance_movie_data(movie) for movie in selected_movies]
-    
-    def search_movies_by_keywords(self, keywords: List[str], count: int = 10) -> List[Dict[str, Any]]:
-        """Rechercher des films par mots-clés"""
-        movies = self.load_movies()
-        filtered_movies = []
-        
-        for movie in movies:
-            movie_keywords = movie.get('keywords', [])
-            movie_text = movie.get('embedding_text', '').lower()
-            movie_overview = movie.get('overview', '').lower()
-            
-            # Rechercher dans les mots-clés, le texte d'embedding et l'overview
-            match_found = False
-            for keyword in keywords:
-                keyword_lower = keyword.lower()
-                if (keyword_lower in movie_keywords or 
-                    keyword_lower in movie_text or 
-                    keyword_lower in movie_overview):
-                    match_found = True
-                    break
-            
-            if match_found:
-                filtered_movies.append(movie)
-        
-        if len(filtered_movies) <= count:
-            return filtered_movies
-        return random.sample(filtered_movies, count)
-    
+
     def get_movie_by_id(self, movie_id: int) -> Optional[Dict[str, Any]]:
         """Obtenir un film par son ID"""
         movies = self.load_movies()
@@ -168,52 +150,87 @@ class TMDBMovieService:
                         break
         
         return result[:count]
-    
+
+    def search_movies_by_structured_filters(self, filters , count: int) -> List[Dict[str, Any]]:
+        """Rechercher des films en fonction de filtres structurés venant d'un modèle LLM"""
+        movies = self.load_movies()
+        scored_movies = []
+        logger.info(f"Searching for {filters}")
+        for movie in movies:
+            score = 0
+
+            # Match genres
+            movie_genres = [g.lower() for g in movie.get('genres', [])]
+            for genre in filters.genres:
+                if genre.lower() in movie_genres:
+                    score += 3  # pondération importante
+
+            # Match keywords
+            movie_keywords = [k.lower() for k in movie.get('keywords', [])]
+            for keyword in filters.keywords:
+                if keyword.lower() in movie_keywords:
+                    score += 2
+
+            # Match cast
+            movie_cast = [c.lower() for c in movie.get('cast', [])]
+            for cast in filters.cast:
+                if cast.lower() in movie_cast:
+                    score += 2
+
+            movie_directors = [c.lower() for c in movie.get('directors', [])]
+            for title in filters.directors:
+                if title.lower() in movie_directors:
+                    score += 1
+
+            if score > 0:
+                scored_movies.append((movie, score))
+
+        # Trier par score décroissant
+        scored_movies.sort(key=lambda x: x[1], reverse=True)
+
+        # Garder les meilleurs
+        top_movies = [self._enhance_movie_data(m[0]) for m in scored_movies[:count]]
+
+        # Compléter si nécessaire
+        if len(top_movies) < count:
+            top_movies += self.get_random_movies(count - len(top_movies))
+
+        return top_movies[:count]
+
     def search_movies_by_prompt(self, prompt: str, count: int = 10) -> List[Dict[str, Any]]:
         """Rechercher des films basés sur un prompt utilisateur"""
-        prompt_lower = prompt.lower()
-        
-        # Mots-clés de genres communs
-        genre_keywords = {
-            'action': ['action', 'combat', 'baston', 'bagarre'],
-            'comédie': ['drôle', 'rire', 'marrant', 'comique', 'humour'],
-            'drame': ['émouvant', 'triste', 'drama', 'dramatique'],
-            'horreur': ['peur', 'effrayant', 'horreur', 'épouvante'],
-            'science-fiction': ['sci-fi', 'futur', 'espace', 'robot', 'technologie'],
-            'romance': ['amour', 'romantique', 'couple'],
-            'thriller': ['suspense', 'tension', 'mystère'],
-            'aventure': ['aventure', 'exploration', 'voyage']
-        }
-        
-        # Détecter les genres dans le prompt
-        detected_genres = []
-        for genre, keywords in genre_keywords.items():
-            if any(keyword in prompt_lower for keyword in keywords):
-                detected_genres.append(genre)
-        
-        # Mots-clés spécifiques à rechercher
-        keywords_to_search = []
-        
-        # Extraire des mots-clés du prompt
-        words = prompt_lower.split()
-        for word in words:
-            if len(word) > 3:  # Ignorer les mots trop courts
-                keywords_to_search.append(word)
-        
-        # Rechercher d'abord par genres si détectés
-        if detected_genres:
-            result = self.search_movies_by_genre(detected_genres, count)
-            if result:
-                return result
-        
-        # Puis par mots-clés
-        if keywords_to_search:
-            result = self.search_movies_by_keywords(keywords_to_search, count)
-            if result:
-                return result
-        
-        # En dernier recours, films aléaoires
-        return self.get_random_movies(count)
+        try:
+            logger.info(f"User prompt: {prompt}")
+            prompt_lower = prompt.lower()
+            genre_keywords = self.parse_prompt_to_filters(prompt_lower)
+            logger.debug(f"Parsed filters: {genre_keywords}")
+            movies = self.search_movies_by_structured_filters(genre_keywords, count)
+            logger.info(f"Found {len(movies)} movies from prompt.")
+            return movies
+        except Exception as e:
+            logger.exception(f"Error in search_movies_by_prompt: {e}")
+            return self.get_random_movies(count)
+
+    def parse_prompt_to_filters(self, user_prompt: str) -> Dict[str, Any]:
+        try:
+            prompt = ChatPromptTemplate.from_messages([
+                ("system",
+                 "Tu es un assistant qui transforme une description libre d'envie de film en critères de recherche structurés."),
+                ("user",
+                 "Voici l'envie de l'utilisateur : {user_input}")
+            ])
+            model = ChatMistralAI(
+                model_name="mistral-medium-latest",
+                api_key="1wy0kbk1f9I7EyyV2ar6S9ZiDZ3h622B"
+            )
+
+            chain = prompt | model.with_structured_output(schema=MovieSearchFilters)
+            result = chain.invoke({"user_input": user_prompt})
+            logger.debug(f"LLM structured result: {result}")
+            return result
+        except Exception as e:
+            logger.exception(f"Error parsing user prompt to filters: {e}")
+            return {}
 
 # Instance globale du service
 tmdb_service = TMDBMovieService()
