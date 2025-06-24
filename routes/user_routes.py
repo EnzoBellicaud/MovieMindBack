@@ -18,7 +18,7 @@ async def get_my_profile(current_user: User = Depends(get_current_user)):
     Récupérer le profil de l'utilisateur connecté
     """
     return UserResponse(
-        id=str(current_user.id),
+        _id=str(current_user.id),
         email=current_user.email,
         username=current_user.username,
         first_name=current_user.first_name,
@@ -55,7 +55,6 @@ async def update_my_profile(
     
     if user_update.last_name is not None:
         update_data["last_name"] = user_update.last_name
-    
     if user_update.email:
         # Vérifier que l'email n'est pas déjà pris
         existing_user = await User.find_one(
@@ -74,7 +73,7 @@ async def update_my_profile(
         await current_user.save()
     
     return UserResponse(
-        id=str(current_user.id),
+        _id=str(current_user.id),
         email=current_user.email,
         username=current_user.username,
         first_name=current_user.first_name,
@@ -101,10 +100,9 @@ async def get_suggested_users(
         {"_id": {"$nin": following_ids}},
         limit=limit
     ).to_list()
-    
     return [
         UserResponse(
-            id=str(user.id),
+            _id=str(user.id),
             email=user.email,
             username=user.username,
             first_name=user.first_name,
@@ -201,7 +199,7 @@ async def get_followers(
     
     return [
         UserResponse(
-            id=str(user.id),
+            _id=str(user.id),
             email=user.email,
             username=user.username,
             first_name=user.first_name,
@@ -231,7 +229,7 @@ async def get_following(
     
     return [
         UserResponse(
-            id=str(user.id),
+            _id=str(user.id),
             email=user.email,
             username=user.username,
             first_name=user.first_name,
@@ -259,7 +257,7 @@ async def get_user_profile(
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
     
     return UserResponse(
-        id=str(user.id),
+        _id=str(user.id),
         email=user.email,
         username=user.username,
         first_name=user.first_name,
@@ -291,7 +289,7 @@ async def search_users(
     
     return [
         UserResponse(
-            id=str(user.id),
+            _id=str(user.id),
             email=user.email,
             username=user.username,
             first_name=user.first_name,
@@ -300,4 +298,138 @@ async def search_users(
             created_at=user.created_at
         )
         for user in users
+    ]
+
+@router.get("/{user_id}/follow-stats")
+async def get_user_follow_stats(
+    user_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Obtenir les statistiques de suivi d'un utilisateur
+    """
+    try:
+        target_user = await User.get(ObjectId(user_id))
+    except:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    # Compter les followers
+    followers_count = await Follow.find(Follow.followed_id == target_user.id).count()
+    
+    # Compter les following
+    following_count = await Follow.find(Follow.follower_id == target_user.id).count()
+    
+    return {
+        "user_id": str(target_user.id),
+        "followers_count": followers_count,
+        "following_count": following_count
+    }
+
+@router.get("/{user_id}/is-following")
+async def is_following_user(
+    user_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Vérifier si l'utilisateur connecté suit un autre utilisateur
+    """
+    try:
+        target_user = await User.get(ObjectId(user_id))
+    except:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    # Vérifier si une relation de suivi existe
+    follow = await Follow.find_one(
+        Follow.follower_id == current_user.id,
+        Follow.followed_id == target_user.id
+    )
+    
+    return {
+        "is_following": follow is not None,
+        "follower_id": str(current_user.id),
+        "followed_id": str(target_user.id)
+    }
+
+@router.get("/{user_id}/followers", response_model=List[UserResponse])
+async def get_user_followers(
+    user_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Obtenir la liste des followers d'un utilisateur spécifique
+    """
+    try:
+        target_user = await User.get(ObjectId(user_id))
+    except:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    # Récupérer les IDs des followers
+    follow_docs = await Follow.find(Follow.followed_id == target_user.id).to_list()
+    follower_ids = [doc.follower_id for doc in follow_docs]
+    
+    if not follower_ids:
+        return []
+    
+    # Récupérer les utilisateurs correspondants
+    followers = await User.find({"_id": {"$in": follower_ids}}).to_list()
+    
+    return [
+        UserResponse(
+            _id=str(user.id),
+            email=user.email,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_active=user.is_active,
+            created_at=user.created_at
+        )
+        for user in followers
+    ]
+
+@router.get("/{user_id}/following", response_model=List[UserResponse])
+async def get_user_following(
+    user_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Obtenir la liste des utilisateurs suivis par un utilisateur spécifique
+    """
+    try:
+        target_user = await User.get(ObjectId(user_id))
+    except:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    
+    # Récupérer les IDs des utilisateurs suivis
+    follow_docs = await Follow.find(Follow.follower_id == target_user.id).to_list()
+    following_ids = [doc.followed_id for doc in follow_docs]
+    
+    if not following_ids:
+        return []
+    
+    # Récupérer les utilisateurs correspondants
+    following = await User.find({"_id": {"$in": following_ids}}).to_list()
+    
+    return [
+        UserResponse(
+            _id=str(user.id),
+            email=user.email,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_active=user.is_active,
+            created_at=user.created_at
+        )
+        for user in following
     ]
