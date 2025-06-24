@@ -1,4 +1,5 @@
 import json
+import os
 import random
 from typing import List, Dict, Any, Optional
 from langchain_mistralai.chat_models import ChatMistralAI
@@ -221,7 +222,7 @@ class TMDBMovieService:
             ])
             model = ChatMistralAI(
                 model_name="mistral-medium-latest",
-                api_key="1wy0kbk1f9I7EyyV2ar6S9ZiDZ3h622B"
+                api_key=os.getenv('MISTRAL_API_KEY')
             )
 
             chain = prompt | model.with_structured_output(schema=MovieSearchFilters)

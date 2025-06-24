@@ -1,3 +1,6 @@
+import os
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routes.auth import router as auth_router
@@ -11,10 +14,11 @@ from db.init_db import init_db, close_mongodb_connection
 async def lifespan(app: FastAPI):
     # Initialize MongoDB database on startup
     await init_db()
+    load_dotenv()
     yield
     # Close MongoDB connection on shutdown
     await close_mongodb_connection()
-    
+
 app = FastAPI(
     title="MovieMind API",
     description="API pour l'application MovieMind - Découverte et recommandation de films",
