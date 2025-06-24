@@ -15,8 +15,7 @@ class User(Document):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     movie_preferences: Optional[List[str]] = []
     
-    # Following system - storing ObjectIds of followed users
-    following: List[str] = []  # Store as strings instead of ObjectId
+    following: List[str] = [] 
     followers: List[str] = []  # Store as strings instead of ObjectId
     
     # Liked movies for recommendations
