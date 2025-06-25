@@ -120,7 +120,7 @@ async def chat_action(
             except Exception as e:
                 return {"success": False, "message": "Echec"}
                 print(e)
-
+        return {"success": True, "message": "Action enregistrée"}
 @router.post("/{chat_id}/select", response_model=dict)
 async def chat_select(chat_id: str, request: ChatSelectRequest):
     """
