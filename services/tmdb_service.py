@@ -115,8 +115,6 @@ class TMDBMovieService:
                 similarity = vector_search_service.calculate_similarity(filters["avg_embedding"], movie_to_compare.combined_embedding)
                 logger.info(f"similarity {similarity}")
                 score += similarity
-            else :
-                logger.info(f"no similarity to calculate")
 
             # Match genres
             movie_genres = [g.lower() for g in movie.get('genres', [])]
@@ -144,15 +142,14 @@ class TMDBMovieService:
             if score > 0:
                 scored_movies.append((movie, score))
 
+        # Compléter si nécessaire
+        if len(scored_movies) < count:
+            scored_movies += self.get_random_movies(count - len(scored_movies))
         # Trier par score décroissant
         scored_movies.sort(key=lambda x: x[1], reverse=True)
-
+        logger.info(f"Found {scored_movies}")
         # Garder les meilleurs
         top_movies = [self._enhance_movie_data(m[0]) for m in scored_movies[:count]]
-
-        # Compléter si nécessaire
-        if len(top_movies) < count:
-            top_movies += self.get_random_movies(count - len(top_movies))
 
         return top_movies[:count]
 
