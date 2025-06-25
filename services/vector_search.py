@@ -289,6 +289,35 @@ class VectorSearchService:
         except Exception:
             return 0.0
 
+    def calculate_similarities_batch(self, target_embedding: List[float], embeddings_matrix: np.ndarray) -> np.ndarray:
+        """Calculate cosine similarities between one target embedding and a matrix of embeddings efficiently"""
+        try:
+            target_vec = np.array(target_embedding)
+            
+            # Normaliser le vecteur cible
+            target_norm = np.linalg.norm(target_vec)
+            if target_norm == 0:
+                return np.zeros(embeddings_matrix.shape[0])
+            
+            target_normalized = target_vec / target_norm
+            
+            # Normaliser toutes les embeddings en une fois
+            norms = np.linalg.norm(embeddings_matrix, axis=1)
+            # Éviter la division par zéro
+            norms[norms == 0] = 1
+            embeddings_normalized = embeddings_matrix / norms[:, np.newaxis]
+            
+            # Calculer toutes les similarités en une fois avec un produit matriciel
+            similarities = np.dot(embeddings_normalized, target_normalized)
+            
+            # Mettre à zéro les similarités pour les vecteurs nuls
+            similarities[np.linalg.norm(embeddings_matrix, axis=1) == 0] = 0.0
+            
+            return similarities
+        except Exception as e:
+            logger.error(f"Error in batch similarity calculation: {e}")
+            return np.zeros(embeddings_matrix.shape[0] if len(embeddings_matrix.shape) > 1 else 1)
+
     async def search_movies_by_text(self, query: str, limit: int = 20,
                                     boost_recent: bool = True,
                                     boost_popular: bool = True) -> List[VectorSearchResult]:

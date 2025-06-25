@@ -51,6 +51,7 @@ async def create_chat(request: ChatCreateRequest):
         filter["avg_embedding"] = []
         movie_count = 10
         movies = await tmdb_service.search_movies_by_structured_filters(filter, movie_count)
+        logger.info(f"Films trouvés pour le prompt '{request.prompt}': {len(movies)} films")
         
         # Créer les données du chat
         chat_data = {
@@ -197,6 +198,10 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
             unique_movies.append(movie)
             if len(unique_movies) >= 15:
                 break
+            
+    logger.info(f"Films raffinés trouvés: {len(unique_movies)}")
+    
+    logger.info(f"Films raffinés: {unique_movies}")
     
     # Si pas assez de films, compléter avec des films aléaoires
     if len(unique_movies) < 10:
@@ -204,6 +209,10 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
         for movie in random_movies:
             if movie["id"] not in seen_ids:
                 unique_movies.append(movie)
+                
+    logger.info(f"Films après ajout aléatoire: {len(unique_movies)}")
+    
+    logger.info(f"Films raffinés: {unique_movies}")
     
     return {"movies": unique_movies[:15]}
 

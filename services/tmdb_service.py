@@ -8,8 +8,12 @@ from langchain.output_parsers import StructuredOutputParser, ResponseSchema
 from langchain.schema.runnable import Runnable
 from pydantic import BaseModel, Field
 import logging
+import numpy as np
+import heapq
+import numpy as np
+from typing import List, Dict, Any, Tuple
 
-from models.Movie import Movie
+from models.Movie import Movie, MovieResponse
 from services.vector_search import vector_search_service
 
 # Configuration du logger
@@ -100,69 +104,61 @@ class TMDBMovieService:
             selected_movies = movies
         else:
             selected_movies = random.sample(movies, count)
-        
+
         return [self._enhance_movie_data(movie) for movie in selected_movies]
 
+
     async def search_movies_by_structured_filters(self, filters, count: int) -> List[Dict[str, Any]]:
-        """Rechercher des films en fonction de filtres structurés venant d'un modèle LLM"""
-        movies = self.load_movies()
-        scored_movies = []
-        logger.info(f"Searching for {filters}")
-        logger.info(f"Total movies to process: {len(movies)}")
+        """
+        Optimized search combining MongoDB pre-filtering, percentage-based similarity scoring,
+        optional batched semantic similarity, and top-k heap selection.
+        """
+        # 1. Build and execute MongoDB query to pre-filter candidates
+        try:
+            query = _build_mongo_query(filters)
+            raw_movies = await Movie.find(query).to_list()
 
-        # Normaliser les filtres pour gérer à la fois les dict et les MovieSearchFilters
-        if isinstance(filters, MovieSearchFilters):
-            filters_dict = filters.dict()
-        else:
-            filters_dict = filters
+            # 2. Compute percentage-based similarity scores (0-100)
+            sim_scores = _compute_similarity_scores(raw_movies, filters)
+            # Keep only those with non-zero similarity to limit work
+            candidates = [(m, s) for m, s in sim_scores if s > 0]
+            
+
+            # 3. Compute batch semantic similarities if embedding provided
+            logger.info(f"Filters: {filters}")
+            if hasattr(filters, 'avg_embedding') and filters.avg_embedding and candidates:
+                
+                movie_ids = [int(m.get('id')) for m, _ in candidates]
+                db_movies = await Movie.find({"tmdb_id": {"$in": movie_ids}}).to_list()
+                emb_map = {m.tmdb_id: m.combined_embedding for m in db_movies if m.combined_embedding}
+                sem_scores = _compute_batch_similarities(filters.avg_embedding, candidates, emb_map)
+                # Combine scores: weighted sum of percentage and semantic similarity (also normalized 0-100)
+                ALPHA = 0.6  # weight towards structured similarity
+                total_scores = []
+                for (movie, crit_pct), sem in zip(candidates, sem_scores):
+                    sem_pct = sem * 100
+                    combined = ALPHA * crit_pct + (1 - ALPHA) * sem_pct
+                    total_scores.append((movie, combined))
+            else:
+                logger.info("No avg_embedding provided, using percentage scores only")
+                total_scores = candidates
+                
+            logger.info(f"Total scores computed for {len(total_scores)} candidates")
+
+            # 4. Top-k selection via heap (highest combined percentage)
+            top_k = heapq.nlargest(count, total_scores, key=lambda x: x[1])
+
+            # 5. Enhance and return
+        except Exception as e:
+            logger.exception(f"Error during movie search: {e}")
+            return []
         
-        for movie in movies:
-            score = 0
-
-            # Match genres
-            movie_genres = [g.lower() for g in movie.get('genres', [])]
-            for genre in filters_dict.get("genres", []):
-                if genre.lower() in movie_genres:
-                    score += 3  # pondération importante
-
-            # Match keywords
-            movie_keywords = set(k.lower() for k in movie.get('keywords', []))
-            for keyword in filters_dict.get("keywords", []):
-                if keyword.lower() in movie_keywords:
-                    score += 5
-
-                # Match cast (plus efficace)
-                movie_cast = set(c.lower() for c in movie.get('cast', []))
-                for cast in filters_dict.get("cast", []):
-                    if cast.lower() in movie_cast:
-                        score += 2
-
-                # Match directors (plus efficace)
-                movie_directors = set(d.lower() for d in movie.get('directors', []))
-                for director in filters_dict.get("directors", []):
-                    if director.lower() in movie_directors:
-                        score += 1
-
-            if score > 0:
-                logger.info(f"Movie: {movie.get('title')} score: {score}")
-                if len(filters_dict.get("avg_embedding", [])) > 0:
-                    movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
-                    similarity = vector_search_service.calculate_similarity(filters["avg_embedding"],
-                                                                            movie_to_compare.combined_embedding)
-                    score += similarity
-                scored_movies.append((movie, score))
+        logger.info(f"top_k: {len(top_k)} movies selected")
+        
+        return [self._enhance_movie_data(movie.model_dump()) for movie, _ in top_k]
 
 
-
-        # Compléter si nécessaire
-        if len(scored_movies) < count:
-            scored_movies += self.get_random_movies(count - len(scored_movies))
-        # Trier par score décroissant
-        scored_movies.sort(key=lambda x: x[1], reverse=True)
-        # Garder les meilleurs
-        top_movies = [self._enhance_movie_data(m[0]) for m in scored_movies[:count]]
-
-        return top_movies[:count]
+   
 
     def parse_prompt_to_filters(self, user_prompt: List[str]) -> Dict[str, Any]:
         try:
@@ -190,3 +186,78 @@ class TMDBMovieService:
 
 # Instance globale du service
 tmdb_service = TMDBMovieService()
+
+
+def _build_mongo_query(filters) -> Dict[str, Any]:
+    """Translate structured filters into a MongoDB $or query dict requiring at least one match."""
+    fd = filters.dict() if hasattr(filters, 'dict') else filters
+    or_clauses = []
+    if fd.get('genres'):
+        or_clauses.append({'genres': {'$in': fd['genres']}})
+    if fd.get('keywords'):
+        or_clauses.append({'keywords': {'$in': fd['keywords']}})
+    if fd.get('cast'):
+        or_clauses.append({'cast': {'$in': fd['cast']}})
+    if fd.get('directors'):
+        or_clauses.append({'directors': {'$in': fd['directors']}})
+    # If no filters, match all
+    if not or_clauses:
+        return {}
+    # Combine with $or so any one condition suffices
+    return {'$or': or_clauses}
+
+
+
+def _compute_similarity_scores(movies: List[Dict[str, Any]], filters) -> List[Tuple[Dict[str, Any], float]]:
+    """Compute percentage similarity between movie attributes and filter terms."""
+    fd = filters.dict() if hasattr(filters, 'dict') else filters
+    # Extract filter lists
+    f_genres = [g.lower() for g in fd.get('genres', [])]
+    f_keywords = [k.lower() for k in fd.get('keywords', [])]
+    f_cast = [c.lower() for c in fd.get('cast', [])]
+    f_dirs = [d.lower() for d in fd.get('directors', [])]
+    # Total filter term counts
+    total_terms = len(f_genres) + len(f_keywords) + len(f_cast) + len(f_dirs)
+    scores: List[Tuple[Dict[str, Any], float]] = []
+    if total_terms == 0:
+        return [(m, 0.0) for m in movies]
+
+    for movie in movies:
+        # Lowercase sets for comparison
+        mg = set(g.lower() for g in (movie.genres or []))
+        mk = set(k.lower() for k in (movie.keywords or []))
+        mc = set(c.lower() for c in (movie.cast or []))
+        md = set(d.lower() for d in (movie.directors or []))
+        # Count matches
+        match_count = (
+            sum(1 for g in f_genres if g in mg) +
+            sum(1 for k in f_keywords if k in mk) +
+            sum(1 for c in f_cast if c in mc) +
+            sum(1 for d in f_dirs if d in md)
+        )
+        # Percentage similarity 0-100
+        pct = (match_count / total_terms) * 100
+        scores.append((movie, pct))
+    return scores
+
+
+def _compute_batch_similarities(query_emb: List[float],
+                            candidates: List[Tuple[Dict[str, Any], float]],
+                            emb_map: Dict[int, List[float]]) -> List[float]:
+    """Compute cosine similarities in batch for candidate movies with embeddings (0-1 range)."""
+    embeddings = []
+    for movie, _ in candidates:
+        mid = int(movie.get('id'))
+        if mid in emb_map:
+            embeddings.append(emb_map[mid])
+        else:
+            embeddings.append([0.0] * len(query_emb))
+    emb_matrix = np.array(embeddings)
+    # Normalized
+    qe = np.array(query_emb)
+    qe_norm = qe / np.linalg.norm(qe)
+    M = emb_matrix / np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+    sims = M.dot(qe_norm)
+    # Clip NaNs
+    sims = np.nan_to_num(sims)
+    return sims.tolist()
