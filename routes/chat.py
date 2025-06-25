@@ -116,7 +116,9 @@ async def chat_action(
                 amount_like = len(list(filter(lambda x: x['action'] == preference_type, chat_data["user_preferences"])))
                 avg_embedding = [x/amount_like for x in chat_data["vector"]]
                 chat_data["filter"]["avg_embedding"] = avg_embedding
+                return {"success": True, "message": "Action enregistrée"}
             except Exception as e:
+                return {"success": False, "message": "Echec"}
                 print(e)
 
 @router.post("/{chat_id}/select", response_model=dict)
