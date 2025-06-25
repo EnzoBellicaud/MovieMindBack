@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
@@ -164,48 +165,20 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
     refinement = request.refinement.lower()
     chat_data["conversation_history"].append(f"🔍 Affinement: \"{refinement}\"")
     chat_data["prompt"].append(refinement.lower())
-    
-    logger.info(f"Affinement reçu: {chat_data.get('avg_embedding')}")
-
-    # Obtenir de nouveaux films basés sur l'affinement et les préférences
-    refined_movies = []    # Si l'utilisateur a des films aimés, chercher des films similaires
-    if request.user_preferences.get("liked"):
-        liked_movie_ids = [movie["id"] for movie in request.user_preferences["liked"]]
-        for movie_id in liked_movie_ids[:2]:  # Prendre les 2 premiers films aimés
-            similar_movies = tmdb_service.get_similar_movies(movie_id, count=5)
-            refined_movies.extend(similar_movies)
+    logger.info(f"Affinement reçu: {chat_data['filter']['avg_embedding']}")
 
     new_filter = tmdb_service.parse_prompt_to_filters(chat_data["prompt"]).dict()
-    
     if chat_data["filter"].get("avg_embedding"):
         new_filter["avg_embedding"] = chat_data["filter"]["avg_embedding"]
     else:
         new_filter["avg_embedding"] = []
-        
-    logger.info(f"Nouveau filtre structuré: {new_filter}")
     chat_data["filter"] = new_filter
+    logger.info(f"Nouveau filtre structuré: {new_filter}")
+
     movie_count = 10
-    additional_movies = await tmdb_service.search_movies_by_structured_filters(new_filter, movie_count)
-    refined_movies.extend(additional_movies)
-    
-    # Supprimer les doublons et limiter
-    seen_ids = set()
-    unique_movies = []
-    for movie in refined_movies:
-        if movie["id"] not in seen_ids:
-            seen_ids.add(movie["id"])
-            unique_movies.append(movie)
-            if len(unique_movies) >= 15:
-                break
-    
-    # Si pas assez de films, compléter avec des films aléaoires
-    if len(unique_movies) < 10:
-        random_movies = tmdb_service.get_random_movies(15 - len(unique_movies))
-        for movie in random_movies:
-            if movie["id"] not in seen_ids:
-                unique_movies.append(movie)
-    
-    return {"movies": unique_movies[:15]}
+    refined_movies = await tmdb_service.search_movies_by_structured_filters(chat_data["filter"], movie_count)
+
+    return {"movies": refined_movies[:movie_count]}
 
 @router.get("/{chat_id}/history", response_model=dict)
 async def get_chat_history(chat_id: str):

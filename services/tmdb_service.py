@@ -131,25 +131,19 @@ class TMDBMovieService:
                 if keyword.lower() in movie_keywords:
                     score += 5
 
-                # Match cast (plus efficace)
-                movie_cast = set(c.lower() for c in movie.get('cast', []))
-                for cast in filters_dict.get("cast", []):
-                    if cast.lower() in movie_cast:
-                        score += 2
+            # Match cast (plus efficace)
+            movie_cast = set(c.lower() for c in movie.get('cast', []))
+            for cast in filters_dict.get("cast", []):
+                if cast.lower() in movie_cast:
+                    score += 2
 
-                # Match directors (plus efficace)
-                movie_directors = set(d.lower() for d in movie.get('directors', []))
-                for director in filters_dict.get("directors", []):
-                    if director.lower() in movie_directors:
-                        score += 1
+            # Match directors (plus efficace)
+            movie_directors = set(d.lower() for d in movie.get('directors', []))
+            for director in filters_dict.get("directors", []):
+                if director.lower() in movie_directors:
+                    score += 1
 
             if score > 0:
-                logger.info(f"Movie: {movie.get('title')} score: {score}")
-                if len(filters_dict.get("avg_embedding", [])) > 0:
-                    movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
-                    similarity = vector_search_service.calculate_similarity(filters["avg_embedding"],
-                                                                            movie_to_compare.combined_embedding)
-                    score += similarity
                 scored_movies.append((movie, score))
 
 
