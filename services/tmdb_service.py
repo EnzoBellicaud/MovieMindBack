@@ -42,7 +42,8 @@ class TMDBMovieService:
         self._movies_cache = None
         self._model = ChatMistralAI(
                 model_name="mistral-medium-latest",
-                api_key=os.getenv('MISTRAL_API_KEY')
+                api_key=os.getenv('MISTRAL_API_KEY'),
+                temperature=0.1,
             )
     
     def _enhance_movie_data(self, movie: Dict[str, Any]) -> Dict[str, Any]:
@@ -164,8 +165,23 @@ class TMDBMovieService:
         try:
             prompt = ChatPromptTemplate.from_messages([
                 ("system",
-                 "Tu es un assistant qui transforme une description libre d'envie de film en critères de recherche structurés.")
-            ]+ [
+                "Tu es un expert du cinéma. Ton rôle est de transformer une description libre des envies de l'utilisateur "
+                "en un ensemble **structuré et très complet** de filtres pour rechercher des films.\n"
+                "Tu dois générer des listes **exhaustives** pour chaque critère pertinent :\n"
+                "- `genres` : tous les genres associés (en français)\n"
+                "- `keywords` : une grande variété de mots-clés significatifs en anglais (thèmes, lieux, ambiances, personnages...)\n"
+                "- `cast` : noms des acteurs emblématiques associés au sujet\n"
+                "- `directors` : réalisateurs liés à ce type de film\n\n"
+                "Exemples :\n"
+                "Si l'utilisateur dit « j’ai envie d’un film comme Spiderman », tu devras inclure :\n"
+                "genres : ['action', 'super-héros', 'aventure']\n"
+                "keywords : ['spider', 'hero', 'Marvel', 'web', 'villain', 'New York', 'responsibility', 'origin story']\n"
+                "cast : ['Tobey Maguire', 'Andrew Garfield', 'Tom Holland', 'Zendaya']\n"
+                "directors : ['Sam Raimi', 'Marc Webb', 'Jon Watts']\n\n"
+                "Sois généreux et large dans les suggestions, même si le prompt est vague. "
+                "Mieux vaut trop de filtres que pas assez."
+                )
+            ] + [
                 ("user", prompt) for prompt in user_prompt
             ])
 
@@ -173,6 +189,7 @@ class TMDBMovieService:
             result = chain.invoke({})
             logger.debug(f"LLM structured result: {result}")
             return result
+
         except Exception as e:
             logger.exception(f"Error parsing user prompt to filters: {e}")
             return {}
