@@ -418,144 +418,103 @@ class VectorSearchService:
             logger.error(f"Error finding similar movies: {e}")
             return []
 
-    async def find_similar_movies_by_ids(self, movie_ids: List[str], limit: int = 20,
-                                         weights: Optional[List[float]] = None,
-                                         exclude_input_movies: bool = True) -> List[VectorSearchResult]:
-        """
-        Find movies similar to a list of movies based on their combined embeddings
-
-        Args:
-            movie_ids: List of movie IDs to use as reference
-            limit: Maximum number of similar movies to return
-            weights: Optional weights for each movie (default: equal weights)
-            exclude_input_movies: Whether to exclude input movies from results
-
-        Returns:
-            List of VectorSearchResult with similar movies sorted by similarity score
-        """
+    async def recommend_movie_from_list(self, tmdb_ids: List[str], limit: int = 1) -> List[VectorSearchResult]:
+        """Recommend a movie based on a list of reference movies"""
         try:
-            # Récupérer les films de référence
+            # Récupérer tous les films de référence
             reference_movies = []
-            for movie_id in movie_ids:
-                movie = await Movie.get(movie_id)
+            for tmdb_id in tmdb_ids:
+                movie = await Movie.find_one({"tmdb_id": int(tmdb_id)})
                 if movie and movie.combined_embedding:
                     reference_movies.append(movie)
 
             if not reference_movies:
-                logger.warning(f"No valid movies found for IDs: {movie_ids}")
                 return []
 
-            # Définir les poids si non fournis
-            if weights is None:
-                weights = [1.0] * len(reference_movies)
-            elif len(weights) != len(reference_movies):
-                logger.warning("Weights length doesn't match movies count, using equal weights")
-                weights = [1.0] * len(reference_movies)
+            # Calculer l'embedding moyen des films de référence
+            avg_embedding = self._calculate_average_embedding([m.combined_embedding for m in reference_movies])
 
-            # Normaliser les poids
-            total_weight = sum(weights)
-            normalized_weights = [w / total_weight for w in weights]
+            # Récupérer tous les autres films avec embeddings
+            all_movies = await Movie.find({
+                "combined_embedding": {"$ne": None},
+                "_id": {"$nin": [movie.id for movie in reference_movies]}
+            }).to_list()
 
-            # Créer un embedding moyen pondéré des films de référence
-            weighted_embeddings = []
-            for movie, weight in zip(reference_movies, normalized_weights):
-                weighted_embedding = np.array(movie.combined_embedding) * weight
-                weighted_embeddings.append(weighted_embedding)
-
-            # Calculer l'embedding moyen
-            average_embedding = np.sum(weighted_embeddings, axis=0)
-            # Normaliser l'embedding résultant
-            average_embedding = average_embedding / (np.linalg.norm(average_embedding) + 1e-8)
-
-            # Collecter tous les genres des films de référence
-            all_reference_genres = set()
-            for movie in reference_movies:
-                if movie.genres:
-                    all_reference_genres.update(movie.genres)
-
-            # Récupérer tous les films avec embeddings
-            query_filter = {"combined_embedding": {"$ne": None}}
-            if exclude_input_movies:
-                # Exclure les films d'entrée des résultats
-                query_filter["_id"] = {"$nin": [movie.id for movie in reference_movies]}
-
-            movies_with_embeddings = await Movie.find(query_filter).to_list()
-
-            # Calculer les similarités
             results = []
-            for movie in movies_with_embeddings:
+            for movie in all_movies:
                 if movie.combined_embedding:
-                    # Similarité de base avec l'embedding moyen
-                    base_similarity = self._calculate_similarity(
-                        average_embedding.tolist(),
-                        movie.combined_embedding
-                    )
+                    # Calculer la similarité avec l'embedding moyen
+                    similarity = self._calculate_similarity(avg_embedding, movie.combined_embedding)
 
-                    # Bonus pour les genres en commun
-                    genre_bonus = 0
-                    if movie.genres and all_reference_genres:
-                        common_genres = set(movie.genres) & all_reference_genres
-                        genre_bonus = len(common_genres) / len(all_reference_genres)
+                    # Bonus pour les genres communs avec les films de référence
+                    genre_bonus = self._calculate_genre_bonus(reference_movies, movie)
+                    similarity *= (1 + 0.2 * genre_bonus)
 
-                    # Score final avec bonus de genre
-                    final_similarity = base_similarity * (1 + 0.15 * genre_bonus)
+                    results.append(VectorSearchResult(
+                        movie=MovieResponse(
+                            _id=str(movie.id),
+                            tmdb_id=movie.tmdb_id,
+                            title=movie.title,
+                            overview=movie.overview,
+                            release_date=movie.release_date,
+                            genres=movie.genres,
+                            poster_path=movie.poster_path,
+                            backdrop_path=movie.backdrop_path,
+                            adult=movie.adult,
+                            original_language=movie.original_language,
+                            popularity=movie.popularity,
+                            vote_average=movie.vote_average,
+                            vote_count=movie.vote_count,
+                            created_at=movie.created_at
+                        ),
+                        similarity_score=similarity
+                    ))
 
-                    # Calculer aussi les similarités individuelles pour le debug
-                    individual_similarities = []
-                    for ref_movie, weight in zip(reference_movies, normalized_weights):
-                        ind_sim = self._calculate_similarity(
-                            ref_movie.combined_embedding,
-                            movie.combined_embedding
-                        )
-                        individual_similarities.append({
-                            'reference_title': ref_movie.title,
-                            'similarity': ind_sim,
-                            'weight': weight
-                        })
-
-                    movie_response = MovieResponse(
-                        _id=str(movie.id),
-                        tmdb_id=movie.tmdb_id,
-                        title=movie.title,
-                        overview=movie.overview,
-                        release_date=movie.release_date,
-                        genres=movie.genres,
-                        poster_path=movie.poster_path,
-                        backdrop_path=movie.backdrop_path,
-                        adult=movie.adult,
-                        original_language=movie.original_language,
-                        popularity=movie.popularity,
-                        vote_average=movie.vote_average,
-                        vote_count=movie.vote_count,
-                        created_at=movie.created_at
-                    )
-
-                    # Ajouter les métadonnées de similarité
-                    result = VectorSearchResult(
-                        movie=movie_response,
-                        similarity_score=final_similarity
-                    )
-
-                    # Stocker les similarités individuelles dans les features
-                    movie.similarity_features = {
-                        'individual_similarities': individual_similarities,
-                        'genre_bonus': genre_bonus,
-                        'base_similarity': base_similarity
-                    }
-
-                    results.append(result)
-
-            # Trier par score de similarité décroissant
             results.sort(key=lambda x: x.similarity_score, reverse=True)
-
-            # Logger les statistiques
-            logger.info(f"Found {len(results)} similar movies for {len(reference_movies)} input movies")
-
             return results[:limit]
 
         except Exception as e:
-            logger.error(f"Error in find_similar_movies_by_ids: {e}")
+            logger.error(f"Error recommending movie from list: {e}")
             return []
+
+    def _calculate_average_embedding(self, embeddings: List[List[float]]) -> List[float]:
+        """Calculate the average embedding from a list of embeddings"""
+        if not embeddings:
+            return []
+
+        # Supposer que tous les embeddings ont la même dimension
+        embedding_dim = len(embeddings[0])
+        avg_embedding = [0.0] * embedding_dim
+
+        for embedding in embeddings:
+            for i, value in enumerate(embedding):
+                avg_embedding[i] += value
+
+        # Diviser par le nombre d'embeddings pour obtenir la moyenne
+        for i in range(embedding_dim):
+            avg_embedding[i] /= len(embeddings)
+
+        return avg_embedding
+
+    def _calculate_genre_bonus(self, reference_movies: List[Movie], candidate_movie: Movie) -> float:
+        """Calculate genre bonus based on overlap with reference movies"""
+        if not candidate_movie.genres:
+            return 0.0
+
+        # Collecter tous les genres des films de référence
+        all_reference_genres = set()
+        for ref_movie in reference_movies:
+            if ref_movie.genres:
+                all_reference_genres.update(ref_movie.genres)
+
+        if not all_reference_genres:
+            return 0.0
+
+        # Calculer le chevauchement
+        candidate_genres = set(candidate_movie.genres)
+        common_genres = all_reference_genres & candidate_genres
+
+        return len(common_genres) / len(all_reference_genres)
 
     async def get_personalized_recommendations(self, user_id: str, limit: int = 20) -> List[VectorSearchResult]:
         """Get personalized movie recommendations for a user"""

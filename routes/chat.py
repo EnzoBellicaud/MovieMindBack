@@ -119,74 +119,46 @@ async def chat_action(
         if request.action == "like" and chat_data["user_preferences"]["liked"]:
             try:
                 print("kldsmlksqmldkqlsmkdmlksqdmlksqmlkdmlksdmlksqml")
-                # Récupérer les IDs des films likés depuis MongoDB
-                liked_movie_ids = []
-                for liked_movie in chat_data["user_preferences"]["liked"]:
-                    movie = await Movie.find_one({"tmdb_id": liked_movie["id"]})
-                    if movie:
-                        liked_movie_ids.append(movie.id)
+                liked_tmdb_ids = [str(movie["id"]) for movie in chat_data["user_preferences"]["liked"]]
+                similar_result = await vector_search_service.recommend_movie_from_list(liked_tmdb_ids, 1)
 
-                if liked_movie_ids:
-                    # Trouver le Movie correspondant au tmdb_id
-                    liked_movie = await Movie.find_one({"tmdb_id": request.movie_id})
-                    if liked_movie:
-                        similar_results = await vector_search_service.find_similar_movies(
-                            str(liked_movie.id),
-                            limit=15
-                        )
+                if similar_result:
+                    result = similar_result[0]
+                    movie_data = result.movie
+                    similarity_score = result.similarity_score
 
-                    # Convertir les résultats en format TMDB pour le frontend
-                    new_movies = []
                     existing_ids = {movie["id"] for movie in chat_data["movies"]}
+                    if movie_data.tmdb_id not in existing_ids:
+                        tmdb_format = {
+                            "id": movie_data.tmdb_id,
+                            "title": movie_data.title,
+                            "overview": movie_data.overview,
+                            "release_date": movie_data.release_date,
+                            "genres": movie_data.genres,
+                            "vote_average": movie_data.vote_average,
+                            "popularity": movie_data.popularity,
+                            "poster_path": movie_data.poster_path,
+                            "backdrop_path": movie_data.backdrop_path,
+                            "poster_urls": {
+                                "w185": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w185{movie_data.poster_path}" if movie_data.poster_path else "",
+                                "w342": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w342{movie_data.poster_path}" if movie_data.poster_path else "",
+                                "w500": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w500{movie_data.poster_path}" if movie_data.poster_path else "",
+                                "w780": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w780{movie_data.poster_path}" if movie_data.poster_path else "",
+                                "original": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/original{movie_data.poster_path}" if movie_data.poster_path else ""
+                            },
+                            "backdrop_urls": {
+                                "w300": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w300{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
+                                "w780": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w780{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
+                                "w1280": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w1280{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
+                                "original": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/original{movie_data.backdrop_path}" if movie_data.backdrop_path else ""
+                            },
+                            "poster_url": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w500{movie_data.poster_path}" if movie_data.poster_path else "",
+                            "similarity_score": similarity_score
+                        }
 
-                    for result in similar_results:
-                        movie_data = result.movie
-                        # Éviter les doublons
-                        if movie_data.tmdb_id not in existing_ids:
-                            # Convertir au format attendu par le frontend
-                            tmdb_format = {
-                                "id": movie_data.tmdb_id,
-                                "title": movie_data.title,
-                                "overview": movie_data.overview,
-                                "release_date": movie_data.release_date,
-                                "genres": movie_data.genres,
-                                "vote_average": movie_data.vote_average,
-                                "popularity": movie_data.popularity,
-                                "poster_path": movie_data.poster_path,
-                                "backdrop_path": movie_data.backdrop_path,
-                                "poster_urls": {
-                                    "w185": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w185{movie_data.poster_path}" if movie_data.poster_path else "",
-                                    "w342": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w342{movie_data.poster_path}" if movie_data.poster_path else "",
-                                    "w500": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w500{movie_data.poster_path}" if movie_data.poster_path else "",
-                                    "w780": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w780{movie_data.poster_path}" if movie_data.poster_path else "",
-                                    "original": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/original{movie_data.poster_path}" if movie_data.poster_path else ""
-                                },
-                                "backdrop_urls": {
-                                    "w300": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w300{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
-                                    "w780": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w780{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
-                                    "w1280": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w1280{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
-                                    "original": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/original{movie_data.backdrop_path}" if movie_data.backdrop_path else ""
-                                },
-                                "poster_url": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w500{movie_data.poster_path}" if movie_data.poster_path else "",
-                                "similarity_score": result.similarity_score
-                            }
-                            new_movies.append(tmdb_format)
-                            existing_ids.add(movie_data.tmdb_id)
-
-                    # Remplacer les films après l'index actuel
-                    if new_movies and request.currentMovieIndex < len(chat_data["movies"]) - 1:
-                        # Garder les films jusqu'à l'index actuel + 1
-                        movies_to_keep = chat_data["movies"][:request.currentMovieIndex + 1]
-
-                        # Ajouter les nouveaux films recommandés
-                        # Limiter le nombre total de films
-                        remaining_slots = 15 - len(movies_to_keep)
-                        new_movies_to_add = new_movies[:remaining_slots]
-
-                        chat_data["movies"] = movies_to_keep + new_movies_to_add
-                        print(len(chat_data["movies"]))
-                        logger.info(
-                            f"Refreshed movies list after like. Kept {len(movies_to_keep)} movies, added {len(new_movies_to_add)} new recommendations")
+                        chat_data["movies"][request.currentMovieIndex + 1] = tmdb_format
+                    logger.info(
+                        f"Refreshed movies list after like. Kept {movie_data} ")
 
             except Exception as e:
                 logger.error(f"Error refreshing movies after like: {e}")
