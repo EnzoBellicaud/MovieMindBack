@@ -9,6 +9,9 @@ from langchain.schema.runnable import Runnable
 from pydantic import BaseModel, Field
 import logging
 
+from models.Movie import Movie
+from services.vector_search import vector_search_service
+
 # Configuration du logger
 logging.basicConfig(
     level=logging.INFO,
@@ -99,91 +102,42 @@ class TMDBMovieService:
         
         return [self._enhance_movie_data(movie) for movie in selected_movies]
 
-    def get_movie_by_id(self, movie_id: int) -> Optional[Dict[str, Any]]:
-        """Obtenir un film par son ID"""
-        movies = self.load_movies()
-        for movie in movies:
-            if movie.get('id') == movie_id:
-                return movie
-        return None
-    
-    def get_similar_movies(self, base_movie_id: int, count: int = 10) -> List[Dict[str, Any]]:
-        """Obtenir des films similaires basés sur les genres et mots-clés"""
-        base_movie = self.get_movie_by_id(base_movie_id)
-        if not base_movie:
-            return self.get_random_movies(count)
-        
-        base_genres = base_movie.get('genres', [])
-        base_keywords = base_movie.get('keywords', [])
-        
-        movies = self.load_movies()
-        scored_movies = []
-        
-        for movie in movies:
-            if movie.get('id') == base_movie_id:
-                continue  # Ignorer le film de base
-                
-            score = 0
-            movie_genres = movie.get('genres', [])
-            movie_keywords = movie.get('keywords', [])
-            
-            # Score basé sur les genres communs
-            common_genres = set(base_genres) & set(movie_genres)
-            score += len(common_genres) * 2
-            
-            # Score basé sur les mots-clés communs
-            common_keywords = set(base_keywords) & set(movie_keywords)
-            score += len(common_keywords)
-            
-            if score > 0:
-                scored_movies.append((movie, score))
-        
-        # Trier par score décroissant
-        scored_movies.sort(key=lambda x: x[1], reverse=True)
-        
-        # Retourner les meilleurs films
-        result = [movie for movie, score in scored_movies[:count]]
-        
-        # Si pas assez de films similaires, compléter avec des films aléaoires
-        if len(result) < count:
-            remaining = count - len(result)
-            random_movies = self.get_random_movies(remaining * 2)  # Obtenir plus pour filtrer
-            for movie in random_movies:
-                if movie.get('id') not in [m.get('id') for m in result]:
-                    result.append(movie)
-                    if len(result) >= count:
-                        break
-        
-        return result[:count]
 
-    def search_movies_by_structured_filters(self, filters , count: int) -> List[Dict[str, Any]]:
+    async def search_movies_by_structured_filters(self, filters, count: int) -> List[Dict[str, Any]]:
         """Rechercher des films en fonction de filtres structurés venant d'un modèle LLM"""
         movies = self.load_movies()
         scored_movies = []
         logger.info(f"Searching for {filters}")
         for movie in movies:
             score = 0
+            if len(filters["avg_embedding"])>0:
+                movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
+                similarity = vector_search_service.calculate_similarity(filters["avg_embedding"], movie_to_compare.combined_embedding)
+                logger.info(f"similarity {similarity}")
+                score += similarity
+            else :
+                logger.info(f"no similarity to calculate")
 
             # Match genres
             movie_genres = [g.lower() for g in movie.get('genres', [])]
-            for genre in filters.genres:
+            for genre in filters["genres"]:
                 if genre.lower() in movie_genres:
                     score += 3  # pondération importante
 
             # Match keywords
             movie_keywords = [k.lower() for k in movie.get('keywords', [])]
-            for keyword in filters.keywords:
+            for keyword in filters["keywords"]:
                 if keyword.lower() in movie_keywords:
                     score += 2
 
             # Match cast
             movie_cast = [c.lower() for c in movie.get('cast', [])]
-            for cast in filters.cast:
+            for cast in filters["cast"]:
                 if cast.lower() in movie_cast:
                     score += 2
 
             movie_directors = [c.lower() for c in movie.get('directors', [])]
-            for title in filters.directors:
+            for title in filters["directors"]:
                 if title.lower() in movie_directors:
                     score += 1
 
@@ -201,20 +155,6 @@ class TMDBMovieService:
             top_movies += self.get_random_movies(count - len(top_movies))
 
         return top_movies[:count]
-
-    def search_movies_by_prompt(self, prompt: str, count: int = 10) -> List[Dict[str, Any]]:
-        """Rechercher des films basés sur un prompt utilisateur"""
-        try:
-            logger.info(f"User prompt: {prompt}")
-            prompt_lower = prompt.lower()
-            genre_keywords = self.parse_prompt_to_filters(prompt_lower)
-            logger.debug(f"Parsed filters: {genre_keywords}")
-            movies = self.search_movies_by_structured_filters(genre_keywords, count)
-            logger.info(f"Found {len(movies)} movies from prompt.")
-            return movies
-        except Exception as e:
-            logger.exception(f"Error in search_movies_by_prompt: {e}")
-            return self.get_random_movies(count)
 
     def parse_prompt_to_filters(self, user_prompt: List[str]) -> Dict[str, Any]:
         try:

@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 
 from models.Movie import Movie
+from services import vector_search
 from services.tmdb_service import tmdb_service
 from services.vector_search import vector_search_service
 from beanie import PydanticObjectId
@@ -46,24 +47,22 @@ async def create_chat(request: ChatCreateRequest):
         
         # Obtenir des films recommandés basés sur le prompt
         prompt_lower = [request.prompt.lower()]
-        filter = tmdb_service.parse_prompt_to_filters(prompt_lower)
+        filter = tmdb_service.parse_prompt_to_filters(prompt_lower).dict()
+        filter["avg_embedding"] = []
         movie_count = 10
-        movies = tmdb_service.search_movies_by_structured_filters(filter, movie_count)
+        movies = await tmdb_service.search_movies_by_structured_filters(filter, movie_count)
         
         # Créer les données du chat
         chat_data = {
             "id": chat_id,
             "prompt": prompt_lower,
             "filter": filter,
+            "vector": [],
             "isGroupMode": request.isGroupMode,
             "movies": movies,
             "conversation_history": [f"Recherche initiale: \"{request.prompt}\""],
             "created_at": datetime.now().isoformat(),
-            "user_preferences": {
-                "liked": [],
-                "disliked": [],
-                "loved": []
-            }
+            "user_preferences": []
         }
         
         # Stocker le chat
@@ -107,78 +106,18 @@ async def chat_action(
 
     if request.action in action_map:
         preference_type = action_map[request.action]
-        movie_info = {
-            "id": request.movie_id,
-            "title": request.movie_title
-        }
-        chat_data["user_preferences"][preference_type].append(movie_info)
-
-        print(len(chat_data["movies"]))
+        chat_data["user_preferences"].append({"id" : request.movie_id, "action" : preference_type})
 
         # Si c'est un like, rafraîchir les films après l'index actuel
-        if request.action == "like" and chat_data["user_preferences"]["liked"]:
+        if request.action == "like":
             try:
-                print("kldsmlksqmldkqlsmkdmlksqdmlksqmlkdmlksdmlksqml")
-                liked_tmdb_ids = [str(movie["id"]) for movie in chat_data["user_preferences"]["liked"]]
-                similar_result = await vector_search_service.recommend_movie_from_list(liked_tmdb_ids, 1)
-
-                if similar_result:
-                    result = similar_result[0]
-                    movie_data = result.movie
-                    similarity_score = result.similarity_score
-
-                    existing_ids = {movie["id"] for movie in chat_data["movies"]}
-                    if movie_data.tmdb_id not in existing_ids:
-                        tmdb_format = {
-                            "id": movie_data.tmdb_id,
-                            "title": movie_data.title,
-                            "overview": movie_data.overview,
-                            "release_date": movie_data.release_date,
-                            "genres": movie_data.genres,
-                            "vote_average": movie_data.vote_average,
-                            "popularity": movie_data.popularity,
-                            "poster_path": movie_data.poster_path,
-                            "backdrop_path": movie_data.backdrop_path,
-                            "poster_urls": {
-                                "w185": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w185{movie_data.poster_path}" if movie_data.poster_path else "",
-                                "w342": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w342{movie_data.poster_path}" if movie_data.poster_path else "",
-                                "w500": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w500{movie_data.poster_path}" if movie_data.poster_path else "",
-                                "w780": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w780{movie_data.poster_path}" if movie_data.poster_path else "",
-                                "original": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/original{movie_data.poster_path}" if movie_data.poster_path else ""
-                            },
-                            "backdrop_urls": {
-                                "w300": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w300{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
-                                "w780": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w780{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
-                                "w1280": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w1280{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
-                                "original": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/original{movie_data.backdrop_path}" if movie_data.backdrop_path else ""
-                            },
-                            "poster_url": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w500{movie_data.poster_path}" if movie_data.poster_path else "",
-                            "similarity_score": similarity_score
-                        }
-
-                        chat_data["movies"][request.currentMovieIndex + 1] = tmdb_format
-                    logger.info(
-                        f"Refreshed movies list after like. Kept {movie_data} ")
-
+                movie = await Movie.find_one({"tmdb_id": int(request.movie_id)})
+                chat_data["vector"] = [a + b for a, b in zip(chat_data["vector"], movie.combined_embedding)]
+                amount_like = len(list(filter(lambda x: x['action'] == preference_type, chat_data["user_preferences"])))
+                avg_embedding = [x/amount_like for x in chat_data["vector"]]
+                chat_data["filter"]["avg_embedding"] = avg_embedding
             except Exception as e:
-                logger.error(f"Error refreshing movies after like: {e}")
-                # En cas d'erreur, on continue sans rafraîchir les films
-
-        # Ajouter à l'historique
-        action_text = {
-            "like": f"✅ J'ai aimé \"{request.movie_title}\"",
-            "dislike": f"❌ Je n'ai pas aimé \"{request.movie_title}\"",
-            "love": f"💖 Coup de cœur pour \"{request.movie_title}\""
-        }
-        chat_data["conversation_history"].append(action_text[request.action])
-
-    return {
-        "success": True,
-        "message": "Action enregistrée",
-        "movies_updated": request.action == "like",
-        "total_movies": len(chat_data["movies"]),
-        "movies": chat_data["movies"],
-    }
+                print(e)
 
 @router.post("/{chat_id}/select", response_model=dict)
 async def chat_select(chat_id: str, request: ChatSelectRequest):
@@ -233,7 +172,7 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
     new_filter = tmdb_service.parse_prompt_to_filters(chat_data["prompt"])
     chat_data["filter"] = new_filter
     movie_count = 10
-    additional_movies = tmdb_service.search_movies_by_structured_filters(new_filter, movie_count)
+    additional_movies = await tmdb_service.search_movies_by_structured_filters(new_filter, movie_count)
     refined_movies.extend(additional_movies)
     
     # Supprimer les doublons et limiter

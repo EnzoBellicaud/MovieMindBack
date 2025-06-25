@@ -446,10 +446,6 @@ class VectorSearchService:
                     # Calculer la similarité avec l'embedding moyen
                     similarity = self._calculate_similarity(avg_embedding, movie.combined_embedding)
 
-                    # Bonus pour les genres communs avec les films de référence
-                    genre_bonus = self._calculate_genre_bonus(reference_movies, movie)
-                    similarity *= (1 + 0.2 * genre_bonus)
-
                     results.append(VectorSearchResult(
                         movie=MovieResponse(
                             _id=str(movie.id),
