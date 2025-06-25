@@ -357,8 +357,8 @@ class VectorSearchService:
                     if boost_recent and movie.release_date:
                         try:
                             year = int(movie.release_date.split('-')[0])
-                            recency_boost = max(0, (year - 1990) / 35.0)  # Boost pour films après 1990
-                            final_score *= (1 + 0.1 * recency_boost)
+                            recency_boost = max(0, (year - 2000) / 25.0)
+                            final_score *= (1 + 1 * recency_boost)
                         except:
                             pass
 
