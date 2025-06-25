@@ -108,56 +108,90 @@ class TMDBMovieService:
         movies = self.load_movies()
         scored_movies = []
         logger.info(f"Searching for {filters}")
+        logger.info(f"Total movies to process: {len(movies)}")
         
-        # Normaliser les filtres pour gérer à la fois les dict et les MovieSearchFilters
-        if isinstance(filters, MovieSearchFilters):
-            filters_dict = filters.dict()
-        else:
-            filters_dict = filters
+        try:
+            # Normaliser les filtres pour gérer à la fois les dict et les MovieSearchFilters
+            if isinstance(filters, MovieSearchFilters):
+                filters_dict = filters.dict()
+            else:
+                filters_dict = filters
+            
+            # Limiter le nombre de films à traiter pour éviter les boucles infinies
+            movies_to_process = movies  # Limiter à 5000 films max
+            processed_count = 0
+            
+            # Précalculer les embeddings si nécessaire
+            has_embedding = len(filters_dict.get("avg_embedding", [])) > 0
+            if has_embedding:
+                logger.info("Recherche avec embedding activée")
+            
+            for movie in movies_to_process:
+                processed_count += 1
+                if processed_count % 1000 == 0:  # Log tous les 1000 films
+                    logger.info(f"Processed {processed_count}/{len(movies_to_process)} movies")
+                
+                score = 0
+                
+                # Calcul de similarité (seulement si nécessaire et avec moins de logs)
+                if has_embedding:
+                    try:
+                        movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
+                        if movie_to_compare and hasattr(movie_to_compare, 'combined_embedding'):
+                            similarity = vector_search_service.calculate_similarity(filters_dict["avg_embedding"], movie_to_compare.combined_embedding)
+                            score += similarity
+                    except Exception as e:
+                        # Ne pas logger chaque erreur individuelle pour éviter le spam
+                        pass
+                
+                # Match genres (plus efficace)
+                movie_genres = set(g.lower() for g in movie.get('genres', []))
+                for genre in filters_dict.get("genres", []):
+                    if genre.lower() in movie_genres:
+                        score += 3
+
+                # Match keywords (plus efficace)
+                movie_keywords = set(k.lower() for k in movie.get('keywords', []))
+                for keyword in filters_dict.get("keywords", []):
+                    if keyword.lower() in movie_keywords:
+                        score += 2
+
+                # Match cast (plus efficace)
+                movie_cast = set(c.lower() for c in movie.get('cast', []))
+                for cast in filters_dict.get("cast", []):
+                    if cast.lower() in movie_cast:
+                        score += 2
+
+                # Match directors (plus efficace)
+                movie_directors = set(d.lower() for d in movie.get('directors', []))
+                for director in filters_dict.get("directors", []):
+                    if director.lower() in movie_directors:
+                        score += 1
+
+                if score > 0:
+                    scored_movies.append((movie, score))
+
+            logger.info(f"Finished processing {processed_count} movies, found {len(scored_movies)} with scores")
+
+            # Trier par score décroissant
+            scored_movies.sort(key=lambda x: x[1], reverse=True)
+            
+            # Garder les meilleurs
+            top_movies = [self._enhance_movie_data(m[0]) for m in scored_movies[:count]]
+            
+            # Compléter avec des films aléatoires si nécessaire
+            if len(top_movies) < count:
+                needed = count - len(top_movies)
+                random_movies = self.get_random_movies(needed)
+                top_movies.extend(random_movies)
+            
+            logger.info(f"Returning {len(top_movies)} movies")
+            return top_movies[:count]
         
-        for movie in movies:
-            score = 0
-            if len(filters_dict.get("avg_embedding", []))>0:
-                movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
-                similarity = vector_search_service.calculate_similarity(filters["avg_embedding"], movie_to_compare.combined_embedding)
-                logger.info(f"similarity {similarity}")
-                score += similarity
-            # Match genres
-            movie_genres = [g.lower() for g in movie.get('genres', [])]
-            for genre in filters_dict.get("genres", []):
-                if genre.lower() in movie_genres:
-                    score += 3  # pondération importante
-
-            # Match keywords
-            movie_keywords = [k.lower() for k in movie.get('keywords', [])]
-            for keyword in filters_dict.get("keywords", []):
-                if keyword.lower() in movie_keywords:
-                    score += 2
-
-            # Match cast
-            movie_cast = [c.lower() for c in movie.get('cast', [])]
-            for cast in filters_dict.get("cast", []):
-                if cast.lower() in movie_cast:
-                    score += 2
-
-            movie_directors = [c.lower() for c in movie.get('directors', [])]
-            for title in filters_dict.get("directors", []):
-                if title.lower() in movie_directors:
-                    score += 1
-
-            if score > 0:
-                scored_movies.append((movie, score))
-
-        # Compléter si nécessaire
-        if len(scored_movies) < count:
-            scored_movies += self.get_random_movies(count - len(scored_movies))
-        # Trier par score décroissant
-        scored_movies.sort(key=lambda x: x[1], reverse=True)
-        logger.info(f"Found {scored_movies}")
-        # Garder les meilleurs
-        top_movies = [self._enhance_movie_data(m[0]) for m in scored_movies[:count]]
-
-        return top_movies[:count]
+        except Exception as e:
+            logger.exception(f"Error searching movies by structured filters: {e}")
+            # En cas d'erreur, retourner des films aléatoires
+            return self.get_random_movies(count)
 
     def parse_prompt_to_filters(self, user_prompt: List[str]) -> Dict[str, Any]:
         try:
