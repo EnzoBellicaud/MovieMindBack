@@ -1,11 +1,18 @@
-from fastapi import APIRouter, HTTPException
+import logging
+
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import List, Optional
 import uuid
 from datetime import datetime
+
+from models.Movie import Movie
 from services.tmdb_service import tmdb_service
+from services.vector_search import vector_search_service
+from beanie import PydanticObjectId
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
+logger = logging.getLogger(__name__)
 
 # Models pour les requêtes
 class ChatCreateRequest(BaseModel):
@@ -16,6 +23,7 @@ class ChatActionRequest(BaseModel):
     action: str  # "like", "dislike", "love"
     movie_id: int
     movie_title: str
+    currentMovieIndex: int = Query(..., description="Index du film actuel dans la liste")
 
 class ChatSelectRequest(BaseModel):
     movie_id: int
@@ -76,23 +84,27 @@ async def get_chat(chat_id: str):
     
     return CHAT_STORAGE[chat_id]
 
+
 @router.post("/{chat_id}/action", response_model=dict)
-async def chat_action(chat_id: str, request: ChatActionRequest):
+async def chat_action(
+        chat_id: str,
+        request: ChatActionRequest
+):
     """
     Enregistrer une action utilisateur (like, dislike, love) sur un film
     """
     if chat_id not in CHAT_STORAGE:
         raise HTTPException(status_code=404, detail="Chat introuvable")
-    
+
     chat_data = CHAT_STORAGE[chat_id]
-    
+
     # Ajouter l'action aux préférences utilisateur
     action_map = {
         "like": "liked",
-        "dislike": "disliked", 
+        "dislike": "disliked",
         "love": "loved"
     }
-    
+
     if request.action in action_map:
         preference_type = action_map[request.action]
         movie_info = {
@@ -100,7 +112,86 @@ async def chat_action(chat_id: str, request: ChatActionRequest):
             "title": request.movie_title
         }
         chat_data["user_preferences"][preference_type].append(movie_info)
-        
+
+        print(len(chat_data["movies"]))
+
+        # Si c'est un like, rafraîchir les films après l'index actuel
+        if request.action == "like" and chat_data["user_preferences"]["liked"]:
+            try:
+                print("kldsmlksqmldkqlsmkdmlksqdmlksqmlkdmlksdmlksqml")
+                # Récupérer les IDs des films likés depuis MongoDB
+                liked_movie_ids = []
+                for liked_movie in chat_data["user_preferences"]["liked"]:
+                    movie = await Movie.find_one({"tmdb_id": liked_movie["id"]})
+                    if movie:
+                        liked_movie_ids.append(movie.id)
+
+                if liked_movie_ids:
+                    # Trouver le Movie correspondant au tmdb_id
+                    liked_movie = await Movie.find_one({"tmdb_id": request.movie_id})
+                    if liked_movie:
+                        similar_results = await vector_search_service.find_similar_movies(
+                            str(liked_movie.id),
+                            limit=15
+                        )
+
+                    # Convertir les résultats en format TMDB pour le frontend
+                    new_movies = []
+                    existing_ids = {movie["id"] for movie in chat_data["movies"]}
+
+                    for result in similar_results:
+                        movie_data = result.movie
+                        # Éviter les doublons
+                        if movie_data.tmdb_id not in existing_ids:
+                            # Convertir au format attendu par le frontend
+                            tmdb_format = {
+                                "id": movie_data.tmdb_id,
+                                "title": movie_data.title,
+                                "overview": movie_data.overview,
+                                "release_date": movie_data.release_date,
+                                "genres": movie_data.genres,
+                                "vote_average": movie_data.vote_average,
+                                "popularity": movie_data.popularity,
+                                "poster_path": movie_data.poster_path,
+                                "backdrop_path": movie_data.backdrop_path,
+                                "poster_urls": {
+                                    "w185": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w185{movie_data.poster_path}" if movie_data.poster_path else "",
+                                    "w342": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w342{movie_data.poster_path}" if movie_data.poster_path else "",
+                                    "w500": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w500{movie_data.poster_path}" if movie_data.poster_path else "",
+                                    "w780": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w780{movie_data.poster_path}" if movie_data.poster_path else "",
+                                    "original": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/original{movie_data.poster_path}" if movie_data.poster_path else ""
+                                },
+                                "backdrop_urls": {
+                                    "w300": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w300{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
+                                    "w780": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w780{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
+                                    "w1280": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w1280{movie_data.backdrop_path}" if movie_data.backdrop_path else "",
+                                    "original": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/original{movie_data.backdrop_path}" if movie_data.backdrop_path else ""
+                                },
+                                "poster_url": f"{tmdb_service.TMDB_IMAGE_BASE_URL}/w500{movie_data.poster_path}" if movie_data.poster_path else "",
+                                "similarity_score": result.similarity_score
+                            }
+                            new_movies.append(tmdb_format)
+                            existing_ids.add(movie_data.tmdb_id)
+
+                    # Remplacer les films après l'index actuel
+                    if new_movies and request.currentMovieIndex < len(chat_data["movies"]) - 1:
+                        # Garder les films jusqu'à l'index actuel + 1
+                        movies_to_keep = chat_data["movies"][:request.currentMovieIndex + 1]
+
+                        # Ajouter les nouveaux films recommandés
+                        # Limiter le nombre total de films
+                        remaining_slots = 15 - len(movies_to_keep)
+                        new_movies_to_add = new_movies[:remaining_slots]
+
+                        chat_data["movies"] = movies_to_keep + new_movies_to_add
+                        print(len(chat_data["movies"]))
+                        logger.info(
+                            f"Refreshed movies list after like. Kept {len(movies_to_keep)} movies, added {len(new_movies_to_add)} new recommendations")
+
+            except Exception as e:
+                logger.error(f"Error refreshing movies after like: {e}")
+                # En cas d'erreur, on continue sans rafraîchir les films
+
         # Ajouter à l'historique
         action_text = {
             "like": f"✅ J'ai aimé \"{request.movie_title}\"",
@@ -108,8 +199,14 @@ async def chat_action(chat_id: str, request: ChatActionRequest):
             "love": f"💖 Coup de cœur pour \"{request.movie_title}\""
         }
         chat_data["conversation_history"].append(action_text[request.action])
-    
-    return {"success": True, "message": "Action enregistrée"}
+
+    return {
+        "success": True,
+        "message": "Action enregistrée",
+        "movies_updated": request.action == "like",
+        "total_movies": len(chat_data["movies"]),
+        "movies": chat_data["movies"],
+    }
 
 @router.post("/{chat_id}/select", response_model=dict)
 async def chat_select(chat_id: str, request: ChatSelectRequest):
