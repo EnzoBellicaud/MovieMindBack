@@ -144,9 +144,13 @@ class TMDBMovieService:
                         score += 1
 
             if score > 0:
+                if len(filters_dict.get("avg_embedding", [])) > 0:
+                    movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
+                    similarity = vector_search_service.calculate_similarity(filters["avg_embedding"],
+                                                                            movie_to_compare.combined_embedding)
+                    score += similarity
                 scored_movies.append((movie, score))
 
-            logger.info(f"Finished processing {processed_count} movies, found {len(scored_movies)} with scores")
 
             # Trier par score décroissant
             scored_movies.sort(key=lambda x: x[1], reverse=True)
