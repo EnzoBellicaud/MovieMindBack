@@ -32,6 +32,10 @@ class TMDBMovieService:
     def __init__(self, json_file_path: str = "db/tmdb_movies_for_embedding3.json"):
         self.json_file_path = json_file_path
         self._movies_cache = None
+        self._model = ChatMistralAI(
+                model_name="mistral-medium-latest",
+                api_key=os.getenv('MISTRAL_API_KEY')
+            )
     
     def _enhance_movie_data(self, movie: Dict[str, Any]) -> Dict[str, Any]:
         """Améliorer les données d'un film avec des URLs d'images optimisées"""
@@ -212,21 +216,17 @@ class TMDBMovieService:
             logger.exception(f"Error in search_movies_by_prompt: {e}")
             return self.get_random_movies(count)
 
-    def parse_prompt_to_filters(self, user_prompt: str) -> Dict[str, Any]:
+    def parse_prompt_to_filters(self, user_prompt: List[str]) -> Dict[str, Any]:
         try:
             prompt = ChatPromptTemplate.from_messages([
                 ("system",
-                 "Tu es un assistant qui transforme une description libre d'envie de film en critères de recherche structurés."),
-                ("user",
-                 "Voici l'envie de l'utilisateur : {user_input}")
+                 "Tu es un assistant qui transforme une description libre d'envie de film en critères de recherche structurés.")
+            ]+ [
+                ("user", prompt) for prompt in user_prompt
             ])
-            model = ChatMistralAI(
-                model_name="mistral-medium-latest",
-                api_key=os.getenv('MISTRAL_API_KEY')
-            )
 
-            chain = prompt | model.with_structured_output(schema=MovieSearchFilters)
-            result = chain.invoke({"user_input": user_prompt})
+            chain = prompt | self._model.with_structured_output(schema=MovieSearchFilters)
+            result = chain.invoke({})
             logger.debug(f"LLM structured result: {result}")
             return result
         except Exception as e:

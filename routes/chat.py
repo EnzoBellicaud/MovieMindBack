@@ -37,12 +37,16 @@ async def create_chat(request: ChatCreateRequest):
         chat_id = str(uuid.uuid4())
         
         # Obtenir des films recommandés basés sur le prompt
-        movies = tmdb_service.search_movies_by_prompt(request.prompt, count=15)
+        prompt_lower = [request.prompt.lower()]
+        filter = tmdb_service.parse_prompt_to_filters(prompt_lower)
+        movie_count = 10
+        movies = tmdb_service.search_movies_by_structured_filters(filter, movie_count)
         
         # Créer les données du chat
         chat_data = {
             "id": chat_id,
-            "prompt": request.prompt,
+            "prompt": prompt_lower,
+            "filter": filter,
             "isGroupMode": request.isGroupMode,
             "movies": movies,
             "conversation_history": [f"Recherche initiale: \"{request.prompt}\""],
@@ -143,8 +147,10 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
     
     chat_data = CHAT_STORAGE[chat_id]
       # Ajouter l'affinement à l'historique
-    chat_data["conversation_history"].append(f"🔍 Affinement: \"{request.refinement}\"")
-    
+    refinement = request.refinement.lower()
+    chat_data["conversation_history"].append(f"🔍 Affinement: \"{refinement}\"")
+    chat_data["prompt"].append(refinement.lower())
+
     # Obtenir de nouveaux films basés sur l'affinement et les préférences
     refined_movies = []
     
@@ -154,9 +160,11 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
         for movie_id in liked_movie_ids[:2]:  # Prendre les 2 premiers films aimés
             similar_movies = tmdb_service.get_similar_movies(movie_id, count=5)
             refined_movies.extend(similar_movies)
-    
-    # Compléter avec une recherche basée sur l'affinement
-    additional_movies = tmdb_service.search_movies_by_prompt(request.refinement, count=10)
+
+    new_filter = tmdb_service.parse_prompt_to_filters(chat_data["prompt"])
+    chat_data["filter"] = new_filter
+    movie_count = 10
+    additional_movies = tmdb_service.search_movies_by_structured_filters(new_filter, movie_count)
     refined_movies.extend(additional_movies)
     
     # Supprimer les doublons et limiter
