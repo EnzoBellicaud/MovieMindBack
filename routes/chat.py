@@ -170,12 +170,7 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
 
     # Obtenir de nouveaux films basés sur l'affinement et les préférences
     refined_movies = []    # Si l'utilisateur a des films aimés, chercher des films similaires
-    if request.user_preferences.get("liked"):
-        liked_movie_ids = [movie["id"] for movie in request.user_preferences["liked"]]
-        for movie_id in liked_movie_ids[:2]:  # Prendre les 2 premiers films aimés
-            similar_movies = tmdb_service.get_similar_movies(movie_id, count=5)
-            refined_movies.extend(similar_movies)
-
+ 
     new_filter = tmdb_service.parse_prompt_to_filters(chat_data["prompt"]).dict()
     
     if chat_data["filter"].get("avg_embedding"):
@@ -185,7 +180,7 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
         
     logger.info(f"Nouveau filtre structuré: {new_filter}")
     chat_data["filter"] = new_filter
-    movie_count = 10
+    movie_count = 30
     additional_movies = await tmdb_service.search_movies_by_structured_filters(new_filter, movie_count)
     refined_movies.extend(additional_movies)
     
@@ -196,25 +191,23 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
         if movie["id"] not in seen_ids:
             seen_ids.add(movie["id"])
             unique_movies.append(movie)
-            if len(unique_movies) >= 15:
+            if len(unique_movies) >= movie_count:
                 break
             
     logger.info(f"Films raffinés trouvés: {len(unique_movies)}")
     
-    logger.info(f"Films raffinés: {unique_movies}")
     
     # Si pas assez de films, compléter avec des films aléaoires
-    if len(unique_movies) < 10:
-        random_movies = tmdb_service.get_random_movies(15 - len(unique_movies))
+    if len(unique_movies) < movie_count:
+        random_movies = tmdb_service.get_random_movies(movie_count - len(unique_movies))
         for movie in random_movies:
             if movie["id"] not in seen_ids:
                 unique_movies.append(movie)
                 
     logger.info(f"Films après ajout aléatoire: {len(unique_movies)}")
     
-    logger.info(f"Films raffinés: {unique_movies}")
     
-    return {"movies": unique_movies[:15]}
+    return {"movies": unique_movies[:movie_count]}
 
 @router.get("/{chat_id}/history", response_model=dict)
 async def get_chat_history(chat_id: str):

@@ -127,6 +127,8 @@ class TMDBMovieService:
 
             # 3. Compute batch semantic similarities if embedding provided
             logger.info(f"Filters: {filters}")
+            
+            logger.info(f"query: {query}")
             if hasattr(filters, 'avg_embedding') and filters.avg_embedding and candidates:
                 
                 movie_ids = [int(m.get('id')) for m, _ in candidates]
