@@ -110,45 +110,20 @@ class TMDBMovieService:
         logger.info(f"Searching for {filters}")
         logger.info(f"Total movies to process: {len(movies)}")
         
-        try:
-            # Normaliser les filtres pour gérer à la fois les dict et les MovieSearchFilters
-            if isinstance(filters, MovieSearchFilters):
-                filters_dict = filters.dict()
-            else:
-                filters_dict = filters
-            
-            # Limiter le nombre de films à traiter pour éviter les boucles infinies
-            movies_to_process = movies  # Limiter à 5000 films max
-            processed_count = 0
-            
-            # Précalculer les embeddings si nécessaire
-            has_embedding = len(filters_dict.get("avg_embedding", [])) > 0
-            if has_embedding:
-                logger.info("Recherche avec embedding activée")
-            
-            for movie in movies_to_process:
-                processed_count += 1
-                if processed_count % 1000 == 0:  # Log tous les 1000 films
-                    logger.info(f"Processed {processed_count}/{len(movies_to_process)} movies")
-                
-                score = 0
-                
-                # Calcul de similarité (seulement si nécessaire et avec moins de logs)
-                if has_embedding:
-                    try:
-                        movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
-                        if movie_to_compare and hasattr(movie_to_compare, 'combined_embedding'):
-                            similarity = vector_search_service.calculate_similarity(filters_dict["avg_embedding"], movie_to_compare.combined_embedding)
-                            score += similarity
-                    except Exception as e:
-                        # Ne pas logger chaque erreur individuelle pour éviter le spam
-                        pass
-                
-                # Match genres (plus efficace)
-                movie_genres = set(g.lower() for g in movie.get('genres', []))
-                for genre in filters_dict.get("genres", []):
-                    if genre.lower() in movie_genres:
-                        score += 3
+        # Normaliser les filtres pour gérer à la fois les dict et les MovieSearchFilters
+        if isinstance(filters, MovieSearchFilters):
+            filters_dict = filters.dict()
+        else:
+            filters_dict = filters
+        
+        for movie in movies:
+            score = 0
+
+            # Match genres
+            movie_genres = [g.lower() for g in movie.get('genres', [])]
+            for genre in filters_dict.get("genres", []):
+                if genre.lower() in movie_genres:
+                    score += 3  # pondération importante
 
                 # Match keywords (plus efficace)
                 movie_keywords = set(k.lower() for k in movie.get('keywords', []))
@@ -168,8 +143,8 @@ class TMDBMovieService:
                     if director.lower() in movie_directors:
                         score += 1
 
-                if score > 0:
-                    scored_movies.append((movie, score))
+            if score > 0:
+                scored_movies.append((movie, score))
 
             logger.info(f"Finished processing {processed_count} movies, found {len(scored_movies)} with scores")
 
@@ -188,10 +163,6 @@ class TMDBMovieService:
             logger.info(f"Returning {len(top_movies)} movies")
             return top_movies[:count]
         
-        except Exception as e:
-            logger.exception(f"Error searching movies by structured filters: {e}")
-            # En cas d'erreur, retourner des films aléatoires
-            return self.get_random_movies(count)
 
     def parse_prompt_to_filters(self, user_prompt: List[str]) -> Dict[str, Any]:
         try:
