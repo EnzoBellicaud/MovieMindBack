@@ -106,16 +106,20 @@ async def chat_action(
 
     if request.action in action_map:
         preference_type = action_map[request.action]
-        chat_data["user_preferences"].append({"id" : request.movie_id, "action" : preference_type})
-
-        # Si c'est un like, rafraîchir les films après l'index actuel
+        chat_data["user_preferences"].append({"id" : request.movie_id, "action" : preference_type})        # Si c'est un like, rafraîchir les films après l'index actuel
         if request.action == "like":
             try:
                 movie = await Movie.find_one({"tmdb_id": int(request.movie_id)})
-                chat_data["vector"] = [a + b for a, b in zip(chat_data["vector"], movie.combined_embedding)]
-                amount_like = len(list(filter(lambda x: x['action'] == preference_type, chat_data["user_preferences"])))
-                avg_embedding = [x/amount_like for x in chat_data["vector"]]
-                chat_data["filter"]["avg_embedding"] = avg_embedding
+                if movie and hasattr(movie, 'combined_embedding'):
+                    # Initialiser le vecteur si c'est le premier like
+                    if not chat_data["vector"]:
+                        chat_data["vector"] = movie.combined_embedding.copy()
+                    else:
+                        chat_data["vector"] = [a + b for a, b in zip(chat_data["vector"], movie.combined_embedding)]
+                    
+                    amount_like = len(list(filter(lambda x: x['action'] == preference_type, chat_data["user_preferences"])))
+                    avg_embedding = [x/amount_like for x in chat_data["vector"]]
+                    chat_data["filter"]["avg_embedding"] = avg_embedding
                 return {"success": True, "message": "Action enregistrée"}
             except Exception as e:
                 return {"success": False, "message": "Echec"}
@@ -160,18 +164,25 @@ async def chat_refine(chat_id: str, request: ChatRefineRequest):
     refinement = request.refinement.lower()
     chat_data["conversation_history"].append(f"🔍 Affinement: \"{refinement}\"")
     chat_data["prompt"].append(refinement.lower())
+    
+    logger.info(f"Affinement reçu: {chat_data.get('avg_embedding')}")
 
     # Obtenir de nouveaux films basés sur l'affinement et les préférences
-    refined_movies = []
-    
-    # Si l'utilisateur a des films aimés, chercher des films similaires
+    refined_movies = []    # Si l'utilisateur a des films aimés, chercher des films similaires
     if request.user_preferences.get("liked"):
         liked_movie_ids = [movie["id"] for movie in request.user_preferences["liked"]]
         for movie_id in liked_movie_ids[:2]:  # Prendre les 2 premiers films aimés
             similar_movies = tmdb_service.get_similar_movies(movie_id, count=5)
             refined_movies.extend(similar_movies)
 
-    new_filter = tmdb_service.parse_prompt_to_filters(chat_data["prompt"])
+    new_filter = tmdb_service.parse_prompt_to_filters(chat_data["prompt"]).dict()
+    
+    if chat_data["filter"].get("avg_embedding"):
+        new_filter["avg_embedding"] = chat_data["filter"]["avg_embedding"]
+    else:
+        new_filter["avg_embedding"] = []
+        
+    logger.info(f"Nouveau filtre structuré: {new_filter}")
     chat_data["filter"] = new_filter
     movie_count = 10
     additional_movies = await tmdb_service.search_movies_by_structured_filters(new_filter, movie_count)

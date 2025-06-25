@@ -21,10 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 class MovieSearchFilters(BaseModel):
-    genres: List[str] = Field(description="Liste de genres en français, ex: ['comédie', 'drame']")
-    keywords: List[str] = Field(description="Liste de mots-clés significatifs en anglais")
-    cast: List[str] = Field(description="Acteurs du film, ex: ['Tom Hanks', 'Liam Neeson']")
-    directors: List[str] = Field(description="Réalisateurs du film, ex: ['Steven Spielberg']")
+    genres: List[str] = Field(default=[], description="Liste de genres en français, ex: ['comédie', 'drame']")
+    keywords: List[str] = Field(default=[], description="Liste de mots-clés significatifs en anglais")
+    cast: List[str] = Field(default=[], description="Acteurs du film, ex: ['Tom Hanks', 'Liam Neeson']")
+    directors: List[str] = Field(default=[], description="Réalisateurs du film, ex: ['Steven Spielberg']")
+    avg_embedding: List[float] = Field(default=[], description="Embedding moyen pour la recherche de similarité")
 
 
 class TMDBMovieService:
@@ -102,40 +103,45 @@ class TMDBMovieService:
         
         return [self._enhance_movie_data(movie) for movie in selected_movies]
 
-
     async def search_movies_by_structured_filters(self, filters, count: int) -> List[Dict[str, Any]]:
         """Rechercher des films en fonction de filtres structurés venant d'un modèle LLM"""
         movies = self.load_movies()
         scored_movies = []
         logger.info(f"Searching for {filters}")
+        
+        # Normaliser les filtres pour gérer à la fois les dict et les MovieSearchFilters
+        if isinstance(filters, MovieSearchFilters):
+            filters_dict = filters.dict()
+        else:
+            filters_dict = filters
+        
         for movie in movies:
             score = 0
-            if len(filters["avg_embedding"])>0:
+            if len(filters_dict.get("avg_embedding", []))>0:
                 movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
                 similarity = vector_search_service.calculate_similarity(filters["avg_embedding"], movie_to_compare.combined_embedding)
                 logger.info(f"similarity {similarity}")
                 score += similarity
-
             # Match genres
             movie_genres = [g.lower() for g in movie.get('genres', [])]
-            for genre in filters["genres"]:
+            for genre in filters_dict.get("genres", []):
                 if genre.lower() in movie_genres:
                     score += 3  # pondération importante
 
             # Match keywords
             movie_keywords = [k.lower() for k in movie.get('keywords', [])]
-            for keyword in filters["keywords"]:
+            for keyword in filters_dict.get("keywords", []):
                 if keyword.lower() in movie_keywords:
                     score += 2
 
             # Match cast
             movie_cast = [c.lower() for c in movie.get('cast', [])]
-            for cast in filters["cast"]:
+            for cast in filters_dict.get("cast", []):
                 if cast.lower() in movie_cast:
                     score += 2
 
             movie_directors = [c.lower() for c in movie.get('directors', [])]
-            for title in filters["directors"]:
+            for title in filters_dict.get("directors", []):
                 if title.lower() in movie_directors:
                     score += 1
 
@@ -169,6 +175,13 @@ class TMDBMovieService:
         except Exception as e:
             logger.exception(f"Error parsing user prompt to filters: {e}")
             return {}
+
+    def get_similar_movies(self, movie_id: int, count: int = 5) -> List[Dict[str, Any]]:
+        """Obtenir des films similaires à un film donné par ID"""
+        movies = self.load_movies()
+        # Pour l'instant, retourne des films aléaoires
+        # TODO: Implémenter une vraie logique de similarité
+        return self.get_random_movies(count)
 
 # Instance globale du service
 tmdb_service = TMDBMovieService()

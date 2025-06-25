@@ -271,7 +271,7 @@ class VectorSearchService:
 
         return features[:100]
 
-    def _calculate_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+    def calculate_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """Calculate cosine similarity between two vectors"""
         try:
             v1 = np.array(vec1)
