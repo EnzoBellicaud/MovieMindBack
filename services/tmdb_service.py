@@ -117,11 +117,7 @@ class TMDBMovieService:
         
         for movie in movies:
             score = 0
-            if len(filters_dict.get("avg_embedding", []))>0:
-                movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
-                similarity = vector_search_service.calculate_similarity(filters["avg_embedding"], movie_to_compare.combined_embedding)
-                logger.info(f"similarity {similarity}")
-                score += similarity
+
             # Match genres
             movie_genres = [g.lower() for g in movie.get('genres', [])]
             for genre in filters_dict.get("genres", []):
@@ -146,6 +142,11 @@ class TMDBMovieService:
                     score += 1
 
             if score > 0:
+                if len(filters_dict.get("avg_embedding", [])) > 0:
+                    movie_to_compare = await Movie.find_one({"tmdb_id": int(movie.get("id"))})
+                    similarity = vector_search_service.calculate_similarity(filters["avg_embedding"],
+                                                                            movie_to_compare.combined_embedding)
+                    score += similarity
                 scored_movies.append((movie, score))
 
         # Compléter si nécessaire
