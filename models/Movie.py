@@ -10,7 +10,6 @@ class Movie(Document):
     # TMDB data
     
     tmdb_id: int = Field(..., unique=True)
-    id: int = Field(alias="tmdb_id")
     title: str
     original_title: Optional[str] = None
     overview: Optional[str] = None
