@@ -29,6 +29,10 @@ class MovieSearchFilters(BaseModel):
     keywords: List[str] = Field(default=[], description="Liste de mots-clés significatifs en anglais")
     cast: List[str] = Field(default=[], description="Acteurs du film, ex: ['Tom Hanks', 'Liam Neeson']")
     directors: List[str] = Field(default=[], description="Réalisateurs du film, ex: ['Steven Spielberg']")
+    vote_average: Optional[float] = Field(default=None, description="Note minimale du film (0-10)")
+    release_date: Optional[str] = Field(default=None, description="Date de sortie du film au format 'YYYY-MM-DD'")
+    runtime: Optional[int] = Field(default=None, description="Durée du film en minutes")
+    
     avg_embedding: List[float] = Field(default=[], description="Embedding moyen pour la recherche de similarité")
 
 
@@ -121,14 +125,14 @@ class TMDBMovieService:
 
             # 2. Compute percentage-based similarity scores (0-100)
             sim_scores = _compute_similarity_scores(raw_movies, filters)
+            
             # Keep only those with non-zero similarity to limit work
             candidates = [(m, s) for m, s in sim_scores if s > 0]
             
 
             # 3. Compute batch semantic similarities if embedding provided
-            logger.info(f"Filters: {filters}")
+  
             
-            logger.info(f"query: {query}")
             if hasattr(filters, 'avg_embedding') and filters.avg_embedding and candidates:
                 
                 movie_ids = [int(m.get('id')) for m, _ in candidates]
@@ -146,7 +150,6 @@ class TMDBMovieService:
                 logger.info("No avg_embedding provided, using percentage scores only")
                 total_scores = candidates
                 
-            logger.info(f"Total scores computed for {len(total_scores)} candidates")
 
             # 4. Top-k selection via heap (highest combined percentage)
             top_k = heapq.nlargest(count, total_scores, key=lambda x: x[1])
@@ -208,7 +211,7 @@ tmdb_service = TMDBMovieService()
 
 
 def _build_mongo_query(filters) -> Dict[str, Any]:
-    """Translate structured filters into a MongoDB $or query dict requiring at least one match."""
+    """Construit une requête MongoDB où runtime et release_date sont requis, les autres en $or."""
     fd = filters.dict() if hasattr(filters, 'dict') else filters
     or_clauses = []
     if fd.get('genres'):
@@ -219,11 +222,31 @@ def _build_mongo_query(filters) -> Dict[str, Any]:
         or_clauses.append({'cast': {'$in': fd['cast']}})
     if fd.get('directors'):
         or_clauses.append({'directors': {'$in': fd['directors']}})
-    # If no filters, match all
+    if fd.get('vote_average') is not None:
+        or_clauses.append({'vote_average': {'$gte': fd['vote_average']}})
+
+    # Clauses obligatoires
+    must_conditions = []
+    if fd.get('runtime') is not None:
+        must_conditions.append({'runtime': {'$gte': fd['runtime']}})
+    if fd.get('release_date'):
+        must_conditions.append({'release_date': {'$gte': fd['release_date']}})
+
+    # Si aucune condition obligatoire, on retourne juste le OR
+    if not must_conditions:
+        return {'$or': or_clauses} if or_clauses else {}
+
+    # Si aucune condition optionnelle, on retourne juste le AND des obligatoires
     if not or_clauses:
-        return {}
-    # Combine with $or so any one condition suffices
-    return {'$or': or_clauses}
+        return {'$and': must_conditions}
+
+    # Sinon, on combine les deux
+    return {
+        '$and': [
+            {'$or': or_clauses},
+            *must_conditions
+        ]
+    }
 
 
 
@@ -235,28 +258,53 @@ def _compute_similarity_scores(movies: List[Dict[str, Any]], filters) -> List[Tu
     f_keywords = [k.lower() for k in fd.get('keywords', [])]
     f_cast = [c.lower() for c in fd.get('cast', [])]
     f_dirs = [d.lower() for d in fd.get('directors', [])]
+    
+    
+    o_release_date = fd.get('release_date')
+    o_runtime = fd.get('runtime')
+    o_vote_average = fd.get('vote_average')
+
     # Total filter term counts
-    total_terms = len(f_genres) + len(f_keywords) + len(f_cast) + len(f_dirs)
+    total_terms = len(f_genres) + len(f_keywords) + len(f_cast) + len(f_dirs) + \
+        (1 if o_release_date else 0) + \
+        (1 if o_runtime else 0) + \
+        (1 if o_vote_average is not None else 0)
     scores: List[Tuple[Dict[str, Any], float]] = []
     if total_terms == 0:
         return [(m, 0.0) for m in movies]
+    
+
 
     for movie in movies:
+
         # Lowercase sets for comparison
         mg = set(g.lower() for g in (movie.genres or []))
         mk = set(k.lower() for k in (movie.keywords or []))
         mc = set(c.lower() for c in (movie.cast or []))
         md = set(d.lower() for d in (movie.directors or []))
+        
+        if movie.vote_average is not None:
+            logger.info(f"movie.vote_average: {movie.vote_average}")
         # Count matches
         match_count = (
             sum(1 for g in f_genres if g in mg) +
             sum(1 for k in f_keywords if k in mk) +
             sum(1 for c in f_cast if c in mc) +
-            sum(1 for d in f_dirs if d in md)
+            sum(1 for d in f_dirs if d in md) +
+            (1 if o_release_date and movie.release_date and movie.release_date >= o_release_date else 0) +
+            (1 if o_runtime and movie.runtime and movie.runtime >= o_runtime else 0) +
+            (1 if o_vote_average is not None and movie.vote_average is not None and movie.vote_average >= o_vote_average else 0)
         )
+        
+        
         # Percentage similarity 0-100
         pct = (match_count / total_terms) * 100
+        
         scores.append((movie, pct))
+        
+ 
+    scores.sort(key=lambda x: x[1], reverse=True)
+
     return scores
 
 
